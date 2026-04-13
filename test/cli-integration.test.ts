@@ -17,8 +17,8 @@ test("CLI passes unknown args and piped stdin through a single configured accoun
   const tempRoot = await createTempDir("codexes-cli");
   t.after(async () => removeTempDir(tempRoot));
 
-  const localAppData = path.join(tempRoot, "localappdata");
-  const dataRoot = path.join(localAppData, "codexes");
+  const platformState = resolvePlatformStateRoot(tempRoot);
+  const dataRoot = platformState.dataRoot;
   const sharedCodexHome = path.join(dataRoot, "shared-home");
   const binRoot = path.join(tempRoot, "bin");
   const childOutputFile = path.join(tempRoot, "child-output.json");
@@ -74,6 +74,7 @@ test("CLI passes unknown args and piped stdin through a single configured accoun
   delete childEnv.LOCALAPPDATA;
   delete childEnv.LocalAppData;
   delete childEnv.localappdata;
+  delete childEnv.XDG_STATE_HOME;
 
   const child = spawn(
     process.execPath,
@@ -83,10 +84,10 @@ test("CLI passes unknown args and piped stdin through a single configured accoun
       env: {
         ...childEnv,
         CODEX_HOME: sharedCodexHome,
-        LOCALAPPDATA: localAppData,
         LOG_LEVEL: "ERROR",
         PATH: `${binRoot}${path.delimiter}${process.env.PATH ?? ""}`,
         TEST_OUTPUT_FILE: childOutputFile,
+        ...platformState.env,
       },
       stdio: ["pipe", "pipe", "pipe"],
     },
@@ -121,3 +122,36 @@ test("CLI passes unknown args and piped stdin through a single configured accoun
   ) as { last_refresh: string };
   assert.equal(syncedAuth.last_refresh, "from-child");
 });
+
+function resolvePlatformStateRoot(tempRoot: string): {
+  dataRoot: string;
+  env: NodeJS.ProcessEnv;
+} {
+  if (process.platform === "win32") {
+    const localAppData = path.join(tempRoot, "localappdata");
+    return {
+      dataRoot: path.join(localAppData, "codexes"),
+      env: {
+        LOCALAPPDATA: localAppData,
+      },
+    };
+  }
+
+  if (process.platform === "darwin") {
+    const home = path.join(tempRoot, "home");
+    return {
+      dataRoot: path.join(home, "Library", "Application Support", "codexes"),
+      env: {
+        HOME: home,
+      },
+    };
+  }
+
+  const xdgStateHome = path.join(tempRoot, "xdg-state");
+  return {
+    dataRoot: path.join(xdgStateHome, "codexes"),
+    env: {
+      XDG_STATE_HOME: xdgStateHome,
+    },
+  };
+}
