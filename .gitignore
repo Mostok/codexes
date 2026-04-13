@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.log
+.tmp
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+/.ai*
+AGENTS.md
+/.cursor
+/.codex
+/.agents
+/external
+.idea
+artifacts

@@ -1,0 +1,45 @@
+{
+  "name": "codexes",
+  "version": "0.1.0",
+  "description": "Transparent multi-account wrapper around the Codex CLI.",
+  "type": "module",
+  "bin": {
+    "codexes": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "clean": "powershell -NoProfile -Command \"if (Test-Path dist) { Remove-Item -Recurse -Force dist }; if (Test-Path artifacts) { Remove-Item -Recurse -Force artifacts }; if (Test-Path .tmp) { Remove-Item -Recurse -Force .tmp }\"",
+    "dev": "tsx src/cli.ts",
+    "probe:auth-state": "tsx src/runtime/auth-state-probe.ts",
+    "pack:tarball": "node ./scripts/package-release.mjs",
+    "prepack": "npm run build",
+    "smoke:packaged": "node ./scripts/smoke-packaged.mjs",
+    "start": "node dist/cli.js",
+    "test": "node --import tsx --test ./test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "keywords": [
+    "codex",
+    "cli",
+    "wrapper",
+    "accounts"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "esbuild": "^0.25.9",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "@openai/codex": "^0.120.0"
+  }
+}
