@@ -13,6 +13,20 @@ npm test
 node dist/cli.js --help
 ```
 
+Install the current checkout globally and use `codexes` from any terminal:
+
+```bash
+npm install -g .
+codexes --help
+```
+
+Install the public package from anywhere:
+
+```bash
+npm install -g @mostok/codexes
+codexes --help
+```
+
 ## Key Features
 
 - Shared `CODEX_HOME` for stable `config.toml`, `mcp.json`, and `trust/`
@@ -54,7 +68,20 @@ npm run pack:tarball
 npm run smoke:packaged
 ```
 
-The generated package is written to `artifacts/` and can be installed with `npm install -g ./artifacts/codexes-<version>.tgz`.
+The generated package is written to `artifacts/` and can be installed with `npm install -g ./artifacts/mostok-codexes-<version>.tgz`.
+
+## Publish
+
+Publish to npmjs from your machine:
+
+```bash
+export NPM_TOKEN=YOUR_NPM_AUTOMATION_TOKEN
+npm ci
+npm test
+npm publish --access public
+```
+
+Or create a GitHub release and let `.github/workflows/publish-npm.yml` publish the package with repository secret `NPM_TOKEN`.
 
 ## License
 

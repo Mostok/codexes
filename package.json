@@ -1,15 +1,28 @@
 {
-  "name": "codexes",
+  "name": "@mostok/codexes",
   "version": "0.1.0",
   "description": "Transparent multi-account wrapper around the Codex CLI.",
   "type": "module",
   "bin": {
-    "codexes": "./dist/cli.js"
+    "codexes": "dist/cli.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mostok/codexes.git"
+  },
+  "homepage": "https://github.com/Mostok/codexes#readme",
+  "bugs": {
+    "url": "https://github.com/Mostok/codexes/issues"
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "engines": {
     "node": ">=20.11.0"
   },
@@ -19,7 +32,8 @@
     "dev": "tsx src/cli.ts",
     "probe:auth-state": "tsx src/runtime/auth-state-probe.ts",
     "pack:tarball": "node ./scripts/package-release.mjs",
-    "prepack": "npm run build",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm test",
     "smoke:packaged": "node ./scripts/smoke-packaged.mjs",
     "start": "node dist/cli.js",
     "test": "node --import tsx --test ./test/*.test.ts",
@@ -31,7 +45,7 @@
     "wrapper",
     "accounts"
   ],
-  "author": "",
+  "author": "Mostok",
   "license": "ISC",
   "devDependencies": {
     "@types/node": "^24.5.2",

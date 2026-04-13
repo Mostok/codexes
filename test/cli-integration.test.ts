@@ -19,6 +19,7 @@ test("CLI passes unknown args and piped stdin through a single configured accoun
 
   const localAppData = path.join(tempRoot, "localappdata");
   const dataRoot = path.join(localAppData, "codexes");
+  const sharedCodexHome = path.join(dataRoot, "shared-home");
   const binRoot = path.join(tempRoot, "bin");
   const childOutputFile = path.join(tempRoot, "child-output.json");
   const fakeCodexScript = path.join(tempRoot, "fake-codex.mjs");
@@ -59,7 +60,7 @@ test("CLI passes unknown args and piped stdin through a single configured accoun
     credentialStoreMode: "file",
     logger,
     runtimeRoot: path.join(dataRoot, "runtime"),
-    sharedCodexHome: path.join(dataRoot, "shared-home"),
+    sharedCodexHome,
   });
   const runtimePaths = resolveAccountRuntimePaths(runtimeContract, account.id);
   await mkdir(runtimePaths.accountStateDirectory, { recursive: true });
@@ -69,13 +70,19 @@ test("CLI passes unknown args and piped stdin through a single configured accoun
     "utf8",
   );
 
+  const childEnv = { ...process.env };
+  delete childEnv.LOCALAPPDATA;
+  delete childEnv.LocalAppData;
+  delete childEnv.localappdata;
+
   const child = spawn(
     process.execPath,
     ["--import", "tsx", "src/cli.ts", "--model", "gpt-5", "chat", "--json"],
     {
       cwd: process.cwd(),
       env: {
-        ...process.env,
+        ...childEnv,
+        CODEX_HOME: sharedCodexHome,
         LOCALAPPDATA: localAppData,
         LOG_LEVEL: "ERROR",
         PATH: `${binRoot}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -107,7 +114,7 @@ test("CLI passes unknown args and piped stdin through a single configured accoun
   }>(childOutputFile);
   assert.deepEqual(childOutput.argv, ["--model", "gpt-5", "chat", "--json"]);
   assert.equal(childOutput.stdin, "stdin-payload");
-  assert.equal(childOutput.codexHome, path.join(dataRoot, "shared-home"));
+  assert.equal(childOutput.codexHome, sharedCodexHome);
 
   const syncedAuth = JSON.parse(
     await readFile(path.join(runtimePaths.accountStateDirectory, "auth.json"), "utf8"),

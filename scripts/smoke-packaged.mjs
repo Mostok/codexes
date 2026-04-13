@@ -6,7 +6,6 @@ import { spawn } from "node:child_process";
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const artifactsDir = path.join(rootDir, "artifacts");
 const installRoot = path.join(rootDir, ".tmp", "smoke-install");
-const packageBin = path.join(installRoot, process.platform === "win32" ? "" : "bin");
 
 try {
   const tarballPath = await findTarball();
@@ -20,16 +19,17 @@ try {
   await rm(installRoot, { recursive: true, force: true });
   await mkdir(installRoot, { recursive: true });
 
-  await runCommand("npm", ["install", "--prefix", installRoot, tarballPath], rootDir);
+  await runCommand("npm", ["install", "-g", "--prefix", installRoot, tarballPath], rootDir);
 
   const executable = process.platform === "win32"
-    ? path.join(installRoot, "node_modules", ".bin", "codexes.cmd")
-    : path.join(packageBin, "codexes");
+    ? path.join(installRoot, "codexes.cmd")
+    : path.join(installRoot, "bin", "codexes");
 
   await runCommand(executable, ["--help"], rootDir);
 
   log("INFO", "smoke.complete", {
     executable,
+    installMode: "global-prefix",
     result: "ok",
   });
 } catch (error) {
