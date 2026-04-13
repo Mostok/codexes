@@ -81,7 +81,7 @@ npm test
 npm publish --access public
 ```
 
-Or create a GitHub release and let `.github/workflows/publish-npm.yml` publish the package with repository secret `NPM_TOKEN`.
+Or create a GitHub release and let `.github/workflows/publish-npm.yml` publish the package through npm trusted publishing via GitHub OIDC.
 
 ## License
 

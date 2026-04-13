@@ -37,4 +37,4 @@ npm test
 npm publish --access public
 ```
 
-Repository releases can also trigger `.github/workflows/publish-npm.yml` if secret `NPM_TOKEN` is configured.
+Repository releases can also trigger `.github/workflows/publish-npm.yml` through npm trusted publishing via GitHub OIDC.
