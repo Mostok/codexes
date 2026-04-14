@@ -32,7 +32,7 @@ codexes --help
 - Shared `CODEX_HOME` for stable `config.toml`, `mcp.json`, and `trust/`
 - Per-account auth activation for `auth.json` and `sessions/`
 - Runtime locking to avoid concurrent mutation of the shared Codex home
-- Experimental account selection by remaining daily and weekly limits
+- Experimental account selection by remaining primary and secondary window percentages
 - Packaged npm distribution with smoke coverage for real installs
 
 ## Example
@@ -41,10 +41,16 @@ codexes --help
 codexes account add work
 codexes account add personal
 codexes account use work
-CODEXES_ACCOUNT_SELECTION_STRATEGY=remaining-limit-experimental codexes chat --model gpt-5
+codexes chat --model gpt-5
 ```
 
-The experimental selector probes `https://chatgpt.com/backend-api/wham/usage`, compares remaining quota windows, and picks the best usable account before launching the real `codex` binary.
+By default, `codexes` uses the `remaining-limit` selector. It probes `https://chatgpt.com/backend-api/wham/usage`, reads `rate_limit.primary_window` and `rate_limit.secondary_window`, converts `used_percent` into remaining percent, and picks the best usable account before launching the real `codex` binary.
+
+If you need compatibility overrides, set `CODEXES_ACCOUNT_SELECTION_STRATEGY` to `manual-default`, `single-account`, or `remaining-limit`. The legacy value `remaining-limit-experimental` is still accepted for backward compatibility.
+
+Before launch, `codexes` prints an English account selection summary that includes every configured account, its current status, primary and secondary remaining percent, whether the data came from `fresh` probing or `cache`, and which account was selected. In interactive terminals the account lines are colorized; in plain-text contexts the same output stays ANSI-free. If probing is incomplete or unreliable, the CLI prints an explicit fallback message instead of silently behaving like `manual-default`.
+
+`codexes account list` uses the same summary formatter, but stays diagnostic and read-only. When fallback analysis cannot produce a reliable execution winner and no valid default account is available, `account list` still renders the account table plus an execution note instead of failing. Wrapped execution commands remain strict and still require a concrete selected account before launch.
 
 ## Documentation
 

@@ -1,7 +1,8 @@
 import { createLogger } from "../../logging/logger.js";
 import type { AppContext } from "../../core/context.js";
 import { createAccountRegistry } from "../../accounts/account-registry.js";
-import { buildAccountPresentations } from "../../accounts/account-resolution.js";
+import { formatSelectionSummary } from "../../selection/format-selection-summary.js";
+import { resolveSelectionSummary } from "../../selection/selection-summary.js";
 
 export async function runAccountListCommand(context: AppContext): Promise<number> {
   const logger = createLogger({
@@ -14,14 +15,10 @@ export async function runAccountListCommand(context: AppContext): Promise<number
     logger,
     registryFile: context.paths.registryFile,
   });
-  const [accounts, defaultAccount] = await Promise.all([
-    registry.listAccounts(),
-    registry.getDefaultAccount(),
-  ]);
+  const accounts = await registry.listAccounts();
 
   logger.info("command.start", {
     accountCount: accounts.length,
-    defaultAccountId: defaultAccount?.id ?? null,
   });
 
   if (accounts.length === 0) {
@@ -35,22 +32,41 @@ export async function runAccountListCommand(context: AppContext): Promise<number
     return 0;
   }
 
-  const presentations = await buildAccountPresentations({ accounts, logger });
-  const lines = presentations.map(({ account, authAccountId, authMode }) => {
-    const markers = [
-      defaultAccount?.id === account.id ? "default" : null,
-      authMode ? `auth=${authMode}` : null,
-      authAccountId ? `authAccountId=${authAccountId}` : null,
-    ]
-      .filter((value): value is string => Boolean(value))
-      .join(", ");
-
-    return `${defaultAccount?.id === account.id ? "*" : " "} ${account.label} (${account.id})${markers ? ` [${markers}]` : ""}`;
+  const summary = await resolveSelectionSummary({
+    experimentalSelection: context.wrapperConfig.experimentalSelection,
+    fetchImpl: fetch,
+    logger,
+    mode: "display-only",
+    registry,
+    selectionCacheFilePath: context.paths.selectionCacheFile,
+    strategy: context.wrapperConfig.accountSelectionStrategy,
   });
-
-  context.io.stdout.write(`${lines.join("\n")}\n`);
+  const formattedSummary = formatSelectionSummary({
+    capabilities: {
+      stdoutIsTTY: context.output.stdoutIsTTY,
+      useColor: context.output.stdoutIsTTY,
+    },
+    logger,
+    summary,
+  });
+  context.io.stdout.write(formattedSummary);
+  logger.info("summary_rendered", {
+    mode: summary.mode,
+    strategy: summary.strategy,
+    useColor: context.output.stdoutIsTTY,
+    selectedAccountId: summary.selectedAccount?.id ?? null,
+    fallbackReason: summary.fallbackReason,
+    executionBlockedReason: summary.executionBlockedReason,
+  });
+  if (summary.fallbackReason || summary.executionBlockedReason) {
+    logger.warn("fallback_announced", {
+      fallbackReason: summary.fallbackReason,
+      selectedAccountId: summary.selectedAccount?.id ?? null,
+      executionBlockedReason: summary.executionBlockedReason,
+    });
+  }
   logger.info("command.complete", {
-    accountIds: presentations.map(({ account }) => account.id),
+    accountIds: summary.entries.map(({ account }) => account.id),
   });
 
   return 0;

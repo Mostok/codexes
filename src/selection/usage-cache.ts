@@ -29,6 +29,10 @@ export async function loadUsageCache(input: {
     input.logger.debug("selection.usage_cache.load_success", {
       cacheFilePath: input.cacheFilePath,
       entryCount: normalized.entries.length,
+      compatibilitySummary: normalized.entries.map((entry) => ({
+        accountId: entry.accountId,
+        shape: describeSnapshotShape(entry.snapshot),
+      })),
     });
 
     return normalized.entries;
@@ -87,6 +91,7 @@ export function resolveFreshUsageCacheEntry(input: {
     input.logger.debug("selection.usage_cache.miss", {
       accountId: input.accountId,
       ttlMs: input.ttlMs,
+      snapshotSource: "fresh-required",
     });
     return null;
   }
@@ -98,6 +103,10 @@ export function resolveFreshUsageCacheEntry(input: {
       cachedAt: entry.cachedAt,
       ageMs: Number.isFinite(ageMs) ? ageMs : null,
       ttlMs: input.ttlMs,
+      primaryRemainingPercent: entry.snapshot.dailyRemaining,
+      secondaryRemainingPercent: entry.snapshot.weeklyRemaining,
+      snapshotStatus: entry.snapshot.status,
+      compatibilityPath: describeSnapshotShape(entry.snapshot),
     });
     return null;
   }
@@ -107,6 +116,10 @@ export function resolveFreshUsageCacheEntry(input: {
     cachedAt: entry.cachedAt,
     ageMs,
     ttlMs: input.ttlMs,
+    primaryRemainingPercent: entry.snapshot.dailyRemaining,
+    secondaryRemainingPercent: entry.snapshot.weeklyRemaining,
+    snapshotStatus: entry.snapshot.status,
+    compatibilityPath: describeSnapshotShape(entry.snapshot),
   });
   return entry;
 }
@@ -153,4 +166,18 @@ function isNodeErrorWithCode(error: unknown, code: string): error is NodeJS.Errn
     "code" in error &&
     error.code === code
   );
+}
+
+function describeSnapshotShape(snapshot: NormalizedUsageSnapshot): "current" | "legacy-compatible" {
+  if (
+    typeof snapshot === "object" &&
+    snapshot !== null &&
+    "windows" in snapshot &&
+    typeof snapshot.windows === "object" &&
+    snapshot.windows !== null
+  ) {
+    return "current";
+  }
+
+  return "legacy-compatible";
 }

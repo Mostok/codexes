@@ -6,8 +6,11 @@ export interface UsageQuotaWindowRaw {
   reset_at?: number | string | null;
   resets_at?: number | string | null;
   next_reset_at?: number | string | null;
-  percent_used?: number | null;
-  percentage_used?: number | null;
+  reset_after_seconds?: number | null;
+  limit_window_seconds?: number | null;
+  percent_used?: number | string | null;
+  percentage_used?: number | string | null;
+  used_percent?: number | string | null;
   [key: string]: unknown;
 }
 
@@ -16,6 +19,9 @@ export interface WhamUsageResponseRaw {
   accountId?: string | null;
   allowed?: boolean | null;
   limit_reached?: boolean | null;
+  plan?: string | null;
+  subscription_plan?: string | null;
+  plan_type?: string | null;
   daily?: UsageQuotaWindowRaw | null;
   weekly?: UsageQuotaWindowRaw | null;
   usage?: {
@@ -26,6 +32,15 @@ export interface WhamUsageResponseRaw {
   quotas?: {
     daily?: UsageQuotaWindowRaw | null;
     weekly?: UsageQuotaWindowRaw | null;
+    [key: string]: unknown;
+  } | null;
+  rate_limit?: {
+    allowed?: boolean | null;
+    limit_reached?: boolean | null;
+    plan?: string | null;
+    subscription_plan?: string | null;
+    primary_window?: UsageQuotaWindowRaw | null;
+    secondary_window?: UsageQuotaWindowRaw | null;
     [key: string]: unknown;
   } | null;
   [key: string]: unknown;
@@ -51,6 +66,7 @@ export interface NormalizedUsageSnapshot {
   accountId: string | null;
   allowed: boolean;
   limitReached: boolean;
+  plan: string | null;
   dailyRemaining: number | null;
   weeklyRemaining: number | null;
   dailyResetsAt: string | null;

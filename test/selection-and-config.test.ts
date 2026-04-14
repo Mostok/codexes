@@ -77,7 +77,46 @@ test("single-account strategy rejects unsupported states", async () => {
   );
 });
 
-test("wrapper config resolves keyring mode and single-account strategy", async (t) => {
+test("wrapper config defaults to experimental selection when no override is provided", async (t) => {
+  const tempRoot = await createTempDir("codexes-wrapper-config-default"); 
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { events, logger } = createTestLogger();
+  const sharedCodexHome = path.join(tempRoot, "shared-home");
+  await mkdir(sharedCodexHome, { recursive: true });
+  await writeFile(
+    path.join(sharedCodexHome, "config.toml"),
+    'cli_auth_credentials_store = "file"\n',
+    "utf8",
+  );
+
+  const paths: ResolvedPaths = {
+    projectRoot: tempRoot,
+    dataRoot: tempRoot,
+    sharedCodexHome,
+    accountRoot: path.join(tempRoot, "accounts"),
+    runtimeRoot: path.join(tempRoot, "runtime"),
+    registryFile: path.join(tempRoot, "registry.json"),
+    wrapperConfigFile: path.join(tempRoot, "codexes.json"),
+    codexConfigFile: path.join(sharedCodexHome, "config.toml"),
+    selectionCacheFile: path.join(tempRoot, "selection-cache.json"),
+  };
+
+  const config = await resolveWrapperConfig({
+    env: {},
+    logger,
+    paths,
+  });
+
+  assert.equal(config.credentialStoreMode, "file");
+  assert.equal(config.accountSelectionStrategy, "remaining-limit");
+  assert.equal(config.accountSelectionStrategySource, "default");
+  assert.equal(config.experimentalSelection.enabled, true);
+  assertEvent(events, "wrapper_config.selection_strategy_default_applied", "info");
+  assertEvent(events, "wrapper_config.resolved", "info");
+});
+
+test("wrapper config resolves keyring mode and single-account strategy override", async (t) => {
   const tempRoot = await createTempDir("codexes-wrapper-config");
   t.after(async () => removeTempDir(tempRoot));
 
@@ -112,11 +151,91 @@ test("wrapper config resolves keyring mode and single-account strategy", async (
 
   assert.equal(config.credentialStoreMode, "keyring");
   assert.equal(config.accountSelectionStrategy, "single-account");
+  assert.equal(config.accountSelectionStrategySource, "env-override");
   assert.equal(config.selectionCacheFilePath, paths.selectionCacheFile);
   assert.equal(config.experimentalSelection.enabled, false);
   assert.equal(config.experimentalSelection.probeTimeoutMs, 3500);
   assert.equal(config.experimentalSelection.cacheTtlMs, 60000);
   assert.equal(config.experimentalSelection.useAccountIdHeader, false);
   assert.match(config.credentialStorePolicyReason, /only file-backed auth storage/i);
+  assertEvent(events, "wrapper_config.selection_strategy_override_applied", "info");
   assertEvent(events, "wrapper_config.resolved", "info");
+});
+
+test("wrapper config falls back to remaining-limit on invalid strategy override", async (t) => {
+  const tempRoot = await createTempDir("codexes-wrapper-config-invalid");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { events, logger } = createTestLogger();
+  const sharedCodexHome = path.join(tempRoot, "shared-home");
+  await mkdir(sharedCodexHome, { recursive: true });
+  await writeFile(
+    path.join(sharedCodexHome, "config.toml"),
+    'cli_auth_credentials_store = "file"\n',
+    "utf8",
+  );
+
+  const paths: ResolvedPaths = {
+    projectRoot: tempRoot,
+    dataRoot: tempRoot,
+    sharedCodexHome,
+    accountRoot: path.join(tempRoot, "accounts"),
+    runtimeRoot: path.join(tempRoot, "runtime"),
+    registryFile: path.join(tempRoot, "registry.json"),
+    wrapperConfigFile: path.join(tempRoot, "codexes.json"),
+    codexConfigFile: path.join(sharedCodexHome, "config.toml"),
+    selectionCacheFile: path.join(tempRoot, "selection-cache.json"),
+  };
+
+  const config = await resolveWrapperConfig({
+    env: {
+      CODEXES_ACCOUNT_SELECTION_STRATEGY: "not-a-real-mode",
+    },
+    logger,
+    paths,
+  });
+
+  assert.equal(config.accountSelectionStrategy, "remaining-limit");
+  assert.equal(config.accountSelectionStrategySource, "invalid-env-fallback");
+  assert.equal(config.experimentalSelection.enabled, true);
+  assertEvent(events, "wrapper_config.selection_strategy_invalid_override", "warn");
+  assertEvent(events, "wrapper_config.resolved", "info");
+});
+
+test("wrapper config accepts remaining-limit-experimental as a legacy alias", async (t) => {
+  const tempRoot = await createTempDir("codexes-wrapper-config-legacy-alias");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { logger } = createTestLogger();
+  const sharedCodexHome = path.join(tempRoot, "shared-home");
+  await mkdir(sharedCodexHome, { recursive: true });
+  await writeFile(
+    path.join(sharedCodexHome, "config.toml"),
+    'cli_auth_credentials_store = "file"\n',
+    "utf8",
+  );
+
+  const paths: ResolvedPaths = {
+    projectRoot: tempRoot,
+    dataRoot: tempRoot,
+    sharedCodexHome,
+    accountRoot: path.join(tempRoot, "accounts"),
+    runtimeRoot: path.join(tempRoot, "runtime"),
+    registryFile: path.join(tempRoot, "registry.json"),
+    wrapperConfigFile: path.join(tempRoot, "codexes.json"),
+    codexConfigFile: path.join(sharedCodexHome, "config.toml"),
+    selectionCacheFile: path.join(tempRoot, "selection-cache.json"),
+  };
+
+  const config = await resolveWrapperConfig({
+    env: {
+      CODEXES_ACCOUNT_SELECTION_STRATEGY: "remaining-limit-experimental",
+    },
+    logger,
+    paths,
+  });
+
+  assert.equal(config.accountSelectionStrategy, "remaining-limit");
+  assert.equal(config.accountSelectionStrategySource, "env-override");
+  assert.equal(config.experimentalSelection.enabled, true);
 });

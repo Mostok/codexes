@@ -6,6 +6,7 @@ export type CredentialStoreMode = "file" | "keyring" | "auto" | "missing" | "unk
 export type AccountSelectionStrategy =
   | "manual-default"
   | "single-account"
+  | "remaining-limit"
   | "remaining-limit-experimental";
 
 export interface WrapperConfig {
@@ -15,6 +16,7 @@ export interface WrapperConfig {
   credentialStoreMode: CredentialStoreMode;
   credentialStorePolicyReason: string;
   accountSelectionStrategy: AccountSelectionStrategy;
+  accountSelectionStrategySource: "default" | "env-override" | "invalid-env-fallback";
   experimentalSelection: ExperimentalSelectionConfig;
 }
 
@@ -40,6 +42,7 @@ export async function resolveWrapperConfig(input: {
     input.logger,
   );
 
+  const selectionStrategy = resolveAccountSelectionStrategy(input.env, input.logger);
   const resolved = {
     configFilePath: input.paths.wrapperConfigFile,
     codexConfigFilePath: input.paths.codexConfigFile,
@@ -49,8 +52,13 @@ export async function resolveWrapperConfig(input: {
       credentialStoreMode === "file"
         ? "file mode detected in Codex config"
         : "codexes currently supports only file-backed auth storage",
-    accountSelectionStrategy: resolveAccountSelectionStrategy(input.env),
-    experimentalSelection: resolveExperimentalSelectionConfig(input.env, input.logger),
+    accountSelectionStrategy: selectionStrategy.strategy,
+    accountSelectionStrategySource: selectionStrategy.source,
+    experimentalSelection: resolveExperimentalSelectionConfig({
+      env: input.env,
+      logger: input.logger,
+      strategy: selectionStrategy.strategy,
+    }),
   } satisfies WrapperConfig;
 
   input.logger.info("wrapper_config.resolved", {
@@ -59,35 +67,38 @@ export async function resolveWrapperConfig(input: {
     selectionCacheFilePath: resolved.selectionCacheFilePath,
     credentialStoreMode: resolved.credentialStoreMode,
     accountSelectionStrategy: resolved.accountSelectionStrategy,
+    accountSelectionStrategySource: resolved.accountSelectionStrategySource,
     experimentalSelection: resolved.experimentalSelection,
   });
 
   return resolved;
 }
 
-function resolveExperimentalSelectionConfig(
-  env: NodeJS.ProcessEnv,
-  logger: Logger,
-): ExperimentalSelectionConfig {
+function resolveExperimentalSelectionConfig(input: {
+  env: NodeJS.ProcessEnv;
+  logger: Logger;
+  strategy: AccountSelectionStrategy;
+}): ExperimentalSelectionConfig {
   const probeTimeoutMs = resolvePositiveIntegerEnv({
     defaultValue: DEFAULT_EXPERIMENTAL_PROBE_TIMEOUT_MS,
-    env,
+    env: input.env,
     envKey: "CODEXES_EXPERIMENTAL_SELECTION_TIMEOUT_MS",
-    logger,
+    logger: input.logger,
   });
   const cacheTtlMs = resolvePositiveIntegerEnv({
     defaultValue: DEFAULT_EXPERIMENTAL_CACHE_TTL_MS,
-    env,
+    env: input.env,
     envKey: "CODEXES_EXPERIMENTAL_SELECTION_CACHE_TTL_MS",
-    logger,
+    logger: input.logger,
   });
   const useAccountIdHeader = resolveBooleanEnv(
-    env.CODEXES_EXPERIMENTAL_SELECTION_USE_ACCOUNT_ID_HEADER,
+    input.env.CODEXES_EXPERIMENTAL_SELECTION_USE_ACCOUNT_ID_HEADER,
   );
   const enabled =
-    resolveAccountSelectionStrategy(env) === "remaining-limit-experimental";
+    input.strategy === "remaining-limit" ||
+    input.strategy === "remaining-limit-experimental";
 
-  logger.debug("wrapper_config.experimental_selection_resolved", {
+  input.logger.debug("wrapper_config.experimental_selection_resolved", {
     enabled,
     probeTimeoutMs,
     cacheTtlMs,
@@ -104,18 +115,64 @@ function resolveExperimentalSelectionConfig(
 
 function resolveAccountSelectionStrategy(
   env: NodeJS.ProcessEnv,
-): AccountSelectionStrategy {
-  switch (env.CODEXES_ACCOUNT_SELECTION_STRATEGY?.trim().toLowerCase()) {
+  logger: Logger,
+): {
+  source: "default" | "env-override" | "invalid-env-fallback";
+  strategy: AccountSelectionStrategy;
+} {
+  const rawOverride = env.CODEXES_ACCOUNT_SELECTION_STRATEGY?.trim().toLowerCase();
+
+  switch (rawOverride) {
     case "single-account":
-      return "single-account";
+      logger.info("wrapper_config.selection_strategy_override_applied", {
+        envKey: "CODEXES_ACCOUNT_SELECTION_STRATEGY",
+        requestedStrategy: rawOverride,
+        resolvedStrategy: "single-account",
+      });
+      return {
+        source: "env-override",
+        strategy: "single-account",
+      };
+    case "remaining-limit":
     case "remaining-limit-experimental":
-      return "remaining-limit-experimental";
-    case "manual-default":
+      logger.info("wrapper_config.selection_strategy_override_applied", {
+        envKey: "CODEXES_ACCOUNT_SELECTION_STRATEGY",
+        requestedStrategy: rawOverride,
+        resolvedStrategy: "remaining-limit",
+      });
+      return {
+        source: "env-override",
+        strategy: "remaining-limit",
+      };
     case undefined:
     case "":
-      return "manual-default";
+      logger.info("wrapper_config.selection_strategy_default_applied", {
+        defaultStrategy: "remaining-limit",
+      });
+      return {
+        source: "default",
+        strategy: "remaining-limit",
+      };
+    case "manual-default":
+      logger.info("wrapper_config.selection_strategy_override_applied", {
+        envKey: "CODEXES_ACCOUNT_SELECTION_STRATEGY",
+        requestedStrategy: rawOverride,
+        resolvedStrategy: "manual-default",
+      });
+      return {
+        source: "env-override",
+        strategy: "manual-default",
+      };
     default:
-      return "manual-default";
+      logger.warn("wrapper_config.selection_strategy_invalid_override", {
+        envKey: "CODEXES_ACCOUNT_SELECTION_STRATEGY",
+        rawValue: rawOverride,
+        fallbackStrategy: "remaining-limit",
+      });
+      return {
+        source: "invalid-env-fallback",
+        strategy: "remaining-limit",
+      };
   }
 }
 

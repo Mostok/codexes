@@ -16,7 +16,8 @@ import {
   syncSharedRuntimeBackToAccount,
 } from "../../runtime/activate-account/activate-account.js";
 import { spawnCodexCommand } from "../../process/spawn-codex-command.js";
-import { selectAccountForExecution } from "../../selection/select-account.js";
+import { formatSelectionSummary } from "../../selection/format-selection-summary.js";
+import { resolveSelectionSummary } from "../../selection/selection-summary.js";
 
 export async function runRootCommand(context: AppContext): Promise<number> {
   const logger = createLogger({
@@ -38,6 +39,7 @@ export async function runRootCommand(context: AppContext): Promise<number> {
     createdRuntimeFiles: context.runtimeInitialization.createdFiles,
     credentialStoreMode: context.wrapperConfig.credentialStoreMode,
     accountSelectionStrategy: context.wrapperConfig.accountSelectionStrategy,
+    accountSelectionStrategySource: context.wrapperConfig.accountSelectionStrategySource,
     experimentalSelection: context.wrapperConfig.experimentalSelection,
     codexBinaryPath: context.codexBinary.path,
     recursionGuardSource: context.executablePath,
@@ -114,23 +116,72 @@ export async function runRootCommand(context: AppContext): Promise<number> {
     logger,
     registryFile: context.paths.registryFile,
   });
-  if (context.wrapperConfig.accountSelectionStrategy === "remaining-limit-experimental") {
-    logger.warn("selection.experimental_enabled", {
+  logger.info("selection.strategy_active", {
+    strategy: context.wrapperConfig.accountSelectionStrategy,
+    source: context.wrapperConfig.accountSelectionStrategySource,
+  });
+
+  if (
+    context.wrapperConfig.accountSelectionStrategy === "remaining-limit" ||
+    context.wrapperConfig.accountSelectionStrategy === "remaining-limit-experimental"
+  ) {
+    logger.info("selection.experimental_enabled", {
       endpoint: "https://chatgpt.com/backend-api/wham/usage",
       fallbackStrategy: "manual-default",
       timeoutMs: context.wrapperConfig.experimentalSelection.probeTimeoutMs,
       cacheTtlMs: context.wrapperConfig.experimentalSelection.cacheTtlMs,
       useAccountIdHeader: context.wrapperConfig.experimentalSelection.useAccountIdHeader,
+      source: context.wrapperConfig.accountSelectionStrategySource,
     });
   }
-  const activeAccount = await selectAccountForExecution({
+  const selectionSummary = await resolveSelectionSummary({
     experimentalSelection: context.wrapperConfig.experimentalSelection,
     fetchImpl: fetch,
     logger,
+    mode: "execution",
     registry,
     selectionCacheFilePath: context.paths.selectionCacheFile,
     strategy: context.wrapperConfig.accountSelectionStrategy,
   });
+  const activeAccount = selectionSummary.selectedAccount;
+  if (!activeAccount || !selectionSummary.selectedBy) {
+    logger.error("selection.execution_summary_incomplete", {
+      strategy: selectionSummary.strategy,
+      fallbackReason: selectionSummary.fallbackReason,
+      executionBlockedReason: selectionSummary.executionBlockedReason,
+    });
+    throw new Error(
+      selectionSummary.executionBlockedReason ?? "Execution selection did not resolve an account.",
+    );
+  }
+  const formattedSummary = formatSelectionSummary({
+    capabilities: {
+      stdoutIsTTY: context.output.stdoutIsTTY,
+      useColor: context.output.stdoutIsTTY,
+    },
+    logger,
+    summary: selectionSummary,
+  });
+  context.io.stdout.write(formattedSummary);
+  logger.info("summary_rendered", {
+    mode: selectionSummary.mode,
+    strategy: selectionSummary.strategy,
+    useColor: context.output.stdoutIsTTY,
+    selectedAccountId: activeAccount.id,
+    fallbackReason: selectionSummary.fallbackReason,
+    executionBlockedReason: selectionSummary.executionBlockedReason,
+  });
+  logger.info("selected_account_announced", {
+    accountId: activeAccount.id,
+    label: activeAccount.label,
+    selectedBy: selectionSummary.selectedBy,
+  });
+  if (selectionSummary.fallbackReason) {
+    logger.warn("fallback_announced", {
+      fallbackReason: selectionSummary.fallbackReason,
+      selectedAccountId: activeAccount.id,
+    });
+  }
   const lock = await acquireRuntimeLock({
     logger,
     runtimeRoot: context.paths.runtimeRoot,
@@ -192,7 +243,9 @@ function buildHelpText(): string {
     "",
     "Current status:",
     "  Account management and default Codex passthrough are implemented.",
-    "  Selection strategies: manual-default, single-account, remaining-limit-experimental.",
-    "  Experimental mode probes https://chatgpt.com/backend-api/wham/usage and falls back to manual-default when ranking is unreliable.",
+    "  Default selection strategy: remaining-limit.",
+    "  Available overrides: manual-default, single-account, remaining-limit.",
+    "  Legacy compatibility override: remaining-limit-experimental.",
+    "  Remaining-limit mode probes https://chatgpt.com/backend-api/wham/usage and falls back to manual-default when ranking is unreliable.",
   ].join("\n");
 }

@@ -88,6 +88,21 @@ export async function resolveAccountUsageSnapshots(input: {
     cacheHitCount: resolutions.filter((entry) => entry.ok && entry.source === "cache").length,
     freshSuccessCount: resolutions.filter((entry) => entry.ok && entry.source === "fresh").length,
     failureCount: resolutions.filter((entry) => !entry.ok).length,
+    resolutionSummary: resolutions.map((entry) =>
+      entry.ok
+        ? {
+            accountId: entry.account.id,
+            source: entry.source,
+            snapshotStatus: entry.snapshot.status,
+            primaryRemainingPercent: entry.snapshot.dailyRemaining,
+            secondaryRemainingPercent: entry.snapshot.weeklyRemaining,
+          }
+        : {
+            accountId: entry.account.id,
+            source: entry.source,
+            failureCategory: entry.category,
+          },
+    ),
   });
 
   return resolutions;

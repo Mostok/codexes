@@ -27,7 +27,7 @@ const EXPERIMENTAL_SELECTION_CONFIG: ExperimentalSelectionConfig = {
   useAccountIdHeader: true,
 };
 
-test("experimental selector ranks accounts by remaining daily then weekly usage and reuses cache", async (t) => {
+test("experimental selector ranks accounts by remaining percent windows and reuses cache", async (t) => {
   const tempRoot = await createTempDir("codexes-experimental-cache");
   t.after(async () => removeTempDir(tempRoot));
 
@@ -41,14 +41,28 @@ test("experimental selector ranks accounts by remaining daily then weekly usage 
       fetchCalls.push(accountId ?? "missing");
       return jsonResponse(
         accountId === "acct-1"
-          ? { allowed: true, daily: { remaining: 2 }, weekly: { remaining: 8 } }
-          : { allowed: true, daily: { remaining: 5 }, weekly: { remaining: 6 } },
+          ? {
+              rate_limit: {
+                allowed: true,
+                plan: "free",
+                primary_window: { used_percent: 98 },
+                secondary_window: { used_percent: 92 },
+              },
+            }
+          : {
+              rate_limit: {
+                allowed: true,
+                plan: "pro",
+                primary_window: { used_percent: 95 },
+                secondary_window: { used_percent: 94 },
+              },
+            },
       );
     },
     logger: createTestLogger().logger,
     registry: createRegistry(accounts, "acct-1"),
     selectionCacheFilePath: cacheFilePath,
-    strategy: "remaining-limit-experimental",
+    strategy: "remaining-limit",
   });
 
   assert.equal(firstRun.id, "acct-2");
@@ -63,7 +77,7 @@ test("experimental selector ranks accounts by remaining daily then weekly usage 
     logger,
     registry: createRegistry(accounts, "acct-1"),
     selectionCacheFilePath: cacheFilePath,
-    strategy: "remaining-limit-experimental",
+    strategy: "remaining-limit",
   });
 
   assert.equal(secondRun.id, "acct-2");
@@ -84,9 +98,12 @@ test("experimental selector falls back when probe outcomes are mixed", async (t)
       const accountId = extractAccountIdHeader(init);
       if (accountId === "acct-1") {
         return jsonResponse({
-          allowed: true,
-          daily: { remaining: 3 },
-          weekly: { remaining: 4 },
+          rate_limit: {
+            allowed: true,
+            plan: "free",
+            primary_window: { used_percent: 97 },
+            secondary_window: { used_percent: 96 },
+          },
         });
       }
 
@@ -95,7 +112,7 @@ test("experimental selector falls back when probe outcomes are mixed", async (t)
     logger,
     registry: createRegistry(accounts, "acct-1"),
     selectionCacheFilePath: cacheFilePath,
-    strategy: "remaining-limit-experimental",
+    strategy: "remaining-limit",
   });
 
   assert.equal(selected.id, "acct-1");
@@ -117,7 +134,7 @@ test("experimental selector falls back when all probes fail because auth is miss
     logger,
     registry: createRegistry(accounts, "acct-1"),
     selectionCacheFilePath: cacheFilePath,
-    strategy: "remaining-limit-experimental",
+    strategy: "remaining-limit",
   });
 
   assert.equal(selected.id, "acct-1");
@@ -140,7 +157,7 @@ test("experimental selector falls back when auth state is malformed", async (t) 
     logger,
     registry: createRegistry(accounts, "acct-1"),
     selectionCacheFilePath: cacheFilePath,
-    strategy: "remaining-limit-experimental",
+    strategy: "remaining-limit",
   });
 
   assert.equal(selected.id, "acct-1");
@@ -159,15 +176,18 @@ test("experimental selector falls back when every account is exhausted", async (
     experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
     fetchImpl: async () =>
       jsonResponse({
-        allowed: true,
-        limit_reached: true,
-        daily: { remaining: 0, limit_reached: true },
-        weekly: { remaining: 0, limit_reached: true },
+        rate_limit: {
+          allowed: true,
+          plan: "free",
+          limit_reached: true,
+          primary_window: { used_percent: 100, limit_reached: true },
+          secondary_window: { used_percent: 100, limit_reached: true },
+        },
       }),
     logger,
     registry: createRegistry(accounts, "acct-1"),
     selectionCacheFilePath: cacheFilePath,
-    strategy: "remaining-limit-experimental",
+    strategy: "remaining-limit",
   });
 
   assert.equal(selected.id, "acct-1");
@@ -188,13 +208,44 @@ test("experimental selector falls back on invalid response shapes and recovers f
     logger,
     registry: createRegistry(accounts, "acct-1"),
     selectionCacheFilePath: cacheFilePath,
-    strategy: "remaining-limit-experimental",
+    strategy: "remaining-limit",
   });
 
   assert.equal(selected.id, "acct-1");
   assertEvent(events, "selection.usage_cache.corrupt", "warn");
   assertEvent(events, "selection.usage_probe.invalid_response", "warn");
   assertEvent(events, "selection.experimental_fallback_all_probes_failed", "warn");
+});
+
+test("experimental selector falls back with ambiguous usage only when remaining percent is unavailable", async (t) => {
+  const tempRoot = await createTempDir("codexes-experimental-ambiguous-usage");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { accounts, cacheFilePath } = await createExperimentalAccounts(tempRoot);
+  const { events, logger } = createTestLogger();
+
+  const selected = await selectAccountForExecution({
+    experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
+    fetchImpl: async () =>
+      jsonResponse({
+        rate_limit: {
+          allowed: true,
+          primary_window: {
+            reset_after_seconds: 300,
+          },
+          secondary_window: {
+            reset_after_seconds: 600,
+          },
+        },
+      }),
+    logger,
+    registry: createRegistry(accounts, "acct-1"),
+    selectionCacheFilePath: cacheFilePath,
+    strategy: "remaining-limit",
+  });
+
+  assert.equal(selected.id, "acct-1");
+  assertEvent(events, "selection.experimental_fallback_ambiguous_usage", "warn");
 });
 
 test("experimental selector falls back on timeouts for every account", async (t) => {
@@ -212,12 +263,50 @@ test("experimental selector falls back on timeouts for every account", async (t)
     logger,
     registry: createRegistry(accounts, "acct-1"),
     selectionCacheFilePath: cacheFilePath,
-    strategy: "remaining-limit-experimental",
+        strategy: "remaining-limit",
   });
 
   assert.equal(selected.id, "acct-1");
   assertEvent(events, "selection.usage_probe.timeout", "warn");
   assertEvent(events, "selection.experimental_fallback_all_probes_failed", "warn");
+});
+
+test("experimental execution stays blocking when fallback cannot resolve a default account", async (t) => {
+  const tempRoot = await createTempDir("codexes-experimental-no-default");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { accounts, cacheFilePath } = await createExperimentalAccounts(tempRoot);
+  const { events, logger } = createTestLogger();
+
+  await assert.rejects(
+    () =>
+      selectAccountForExecution({
+        experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
+        fetchImpl: async (_url, init) => {
+          const accountId = extractAccountIdHeader(init);
+          if (accountId === "acct-1") {
+            return jsonResponse({
+              rate_limit: {
+                allowed: true,
+                plan: "free",
+                primary_window: { used_percent: 97 },
+                secondary_window: { used_percent: 96 },
+              },
+            });
+          }
+
+          throw createNamedError("TimeoutError", "timed out");
+        },
+        logger,
+        registry: createRegistry(accounts, null),
+        selectionCacheFilePath: cacheFilePath,
+        strategy: "remaining-limit",
+      }),
+    /no default account is selected/i,
+  );
+
+  assertEvent(events, "selection.experimental_fallback_mixed_probe_outcomes", "warn");
+  assertEvent(events, "selection.execution_blocked_missing_default", "warn");
 });
 
 test("runRootCommand launches the experimentally selected account", async (t) => {
@@ -277,6 +366,7 @@ test("runRootCommand launches the experimentally selected account", async (t) =>
     event: string;
     level: "debug" | "info" | "warn" | "error";
   }> = [];
+  const stdoutChunks: string[] = [];
   const context = createRootCommandContext({
     argv: ["chat"],
     cacheFilePath,
@@ -287,14 +377,29 @@ test("runRootCommand launches the experimentally selected account", async (t) =>
     registryFile,
     runtimeRoot,
     sharedCodexHome,
+    stdoutChunks,
   });
 
   t.mock.method(globalThis, "fetch", async (_url, init) => {
     const accountId = extractAccountIdHeader(init);
     return jsonResponse(
       accountId === "acct-1"
-        ? { allowed: true, daily: { remaining: 1 }, weekly: { remaining: 9 } }
-        : { allowed: true, daily: { remaining: 4 }, weekly: { remaining: 7 } },
+        ? {
+            rate_limit: {
+              allowed: true,
+              plan: "free",
+              primary_window: { used_percent: 99 },
+              secondary_window: { used_percent: 91 },
+            },
+          }
+        : {
+            rate_limit: {
+              allowed: true,
+              plan: "pro",
+              primary_window: { used_percent: 96 },
+              secondary_window: { used_percent: 93 },
+            },
+          },
     );
   });
   const previousOutputFile = process.env.TEST_OUTPUT_FILE;
@@ -313,12 +418,19 @@ test("runRootCommand launches the experimentally selected account", async (t) =>
 
   const childOutput = await readJson<{ accountId: string }>(outputFile);
   assert.equal(childOutput.accountId, "acct-2");
+  assert.match(
+    stdoutChunks.join(""),
+    /Account selection summary:[\s\S]*Selected account: personal \(([^)]+)\) via remaining-limit\./,
+  );
+  assert.match(stdoutChunks.join(""), /5h=4% .*weekly=7% .*plan=pro .*source=fresh/);
+  assert.match(stdoutChunks.join(""), /source=fresh/);
 
   const syncedAuth = JSON.parse(
     await readFile(path.join(personal.authDirectory, "state", "auth.json"), "utf8"),
   ) as { last_refresh: string };
   assert.equal(syncedAuth.last_refresh, "updated-by-child");
-  assertEvent(events, "root.selection.experimental_enabled", "warn");
+  assertEvent(events, "root.selection.strategy_active", "info");
+  assertEvent(events, "root.selection.experimental_enabled", "info");
   assertEvent(events, "root.selection.experimental_selected", "info");
 });
 
@@ -432,7 +544,16 @@ function createRootCommandContext(input: {
   registryFile: string;
   runtimeRoot: string;
   sharedCodexHome: string;
+  stdoutChunks?: string[];
 }): AppContext {
+  const stdout = {
+    isTTY: false,
+    write(chunk: string | Uint8Array) {
+      input.stdoutChunks?.push(String(chunk));
+      return true;
+    },
+  } as NodeJS.WriteStream;
+
   return {
     argv: input.argv,
     executablePath: process.execPath,
@@ -442,8 +563,11 @@ function createRootCommandContext(input: {
       runtime: process.version,
     },
     io: {
-      stdout: { write() { return true; } } as NodeJS.WriteStream,
+      stdout,
       stderr: { write() { return true; } } as NodeJS.WriteStream,
+    },
+    output: {
+      stdoutIsTTY: stdout.isTTY === true,
     },
     logging: {
       level: "DEBUG",
@@ -483,7 +607,8 @@ function createRootCommandContext(input: {
       selectionCacheFilePath: input.cacheFilePath,
       credentialStoreMode: "file",
       credentialStorePolicyReason: "file mode detected in Codex config",
-      accountSelectionStrategy: "remaining-limit-experimental",
+      accountSelectionStrategy: "remaining-limit",
+      accountSelectionStrategySource: "default",
       experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
     },
     codexBinary: {

@@ -94,24 +94,32 @@ If you see `runtime_lock.acquire.timeout`, inspect whether another wrapper proce
 
 ## Selection Strategies
 
-Supported production strategies:
+Default strategy:
+
+- `remaining-limit`: probes `https://chatgpt.com/backend-api/wham/usage` for each configured account, normalizes the quota payload, then ranks usable accounts by:
+  1. primary-window remaining percent descending
+  2. secondary-window remaining percent descending
+  3. current default account first
+  4. stable registry order
+
+Compatibility overrides:
 
 - `manual-default`: uses the selected default account
 - `single-account`: auto-selects the only configured account
 
-Experimental strategy:
+```bash
+codexes chat
+```
 
-- `remaining-limit-experimental`: probes `https://chatgpt.com/backend-api/wham/usage` for each configured account, normalizes the quota payload, then ranks usable accounts by:
-  1. `dailyRemaining` descending
-  2. `weeklyRemaining` descending
-  3. current default account first
-  4. stable registry order
-
-Enable it explicitly:
+Use `CODEXES_ACCOUNT_SELECTION_STRATEGY` only when you need to override the default behavior:
 
 ```bash
-CODEXES_ACCOUNT_SELECTION_STRATEGY=remaining-limit-experimental codexes chat
+CODEXES_ACCOUNT_SELECTION_STRATEGY=manual-default codexes chat
 ```
+
+Backward compatibility:
+
+- `remaining-limit-experimental` is still accepted as a legacy alias for `remaining-limit`
 
 Optional knobs:
 
@@ -123,27 +131,53 @@ Optional knobs:
 
 The selector treats `wham/usage` as a best-effort signal. It is useful for routing between already configured accounts, but it is not a hard wrapper contract.
 
+## User-Facing Summary Output
+
+Before `codexes` launches the real `codex` binary, and when you run `codexes account list`, the CLI prints the same English summary:
+
+- every configured account
+- the normalized usage status (`usable`, `limit-reached`, `not-allowed`, `missing-usage-data`, or `probe-failed`)
+- primary remaining percent
+- secondary remaining percent
+- data source: `fresh`, `cache`, or `unavailable`
+- the selected account and the selection mode that produced it
+
+Each account now renders on one compact line. In TTY mode the formatter adds ANSI color for tags, statuses, and source markers. In non-interactive output the formatter emits the same content without ANSI sequences.
+
+When remaining-limit probing cannot produce a reliable winner, the CLI prints an explicit fallback line. Typical fallback messages cover:
+
+- every probe failing
+- mixed probe outcomes
+- all accounts being exhausted
+- incomplete or ambiguous quota payloads
+
+`fresh` means the account was probed during the current command. `cache` means the CLI reused a still-valid cached snapshot from the short-lived selection cache.
+
+For `codexes account list`, the summary is display-only. If fallback analysis cannot resolve a valid execution account and there is no default account to fall back to, the command still renders the account diagnostics, prints `Selected account: unavailable for execution.`, and includes an `Execution note:` line explaining why launch would be blocked.
+
+For wrapped execution commands such as `codexes chat`, the contract stays strict: no account is launched unless the selector resolves a concrete execution winner.
+
 ### Payload fields used for ranking
 
-The normalizer accepts several response shapes and reads both top-level and nested quota windows:
+The normalizer now treats the `rate_limit` payload as the primary contract and keeps the legacy shapes as compatibility fallbacks:
 
 | Field | Meaning |
 |-------|---------|
-| `allowed` | Whether the account is currently allowed to launch |
-| `limit_reached` | Global exhausted flag when exposed by the endpoint |
-| `daily.remaining` | Remaining daily headroom |
-| `weekly.remaining` | Remaining weekly headroom |
-| `daily.limit_reached` / `weekly.limit_reached` | Per-window exhausted flags |
-| `reset_at` / `resets_at` / `next_reset_at` | Reset timestamp candidates |
-| `percent_used` / `percentage_used` | Optional utilization hints |
+| `rate_limit.allowed` | Whether the account is currently allowed to launch |
+| `rate_limit.limit_reached` | Global exhausted flag when exposed by the endpoint |
+| `rate_limit.primary_window.used_percent` | Used percent for the short window; ranked as the primary signal after conversion to remaining percent |
+| `rate_limit.secondary_window.used_percent` | Used percent for the long window; ranked as the secondary signal after conversion to remaining percent |
+| `rate_limit.*_window.reset_at` / `reset_after_seconds` | Reset timestamp candidates |
+| `rate_limit.*_window.limit_window_seconds` | Window-size metadata for diagnostics |
+| `daily.remaining` / `weekly.remaining` | Legacy fallback shapes still accepted for backward compatibility |
 
-The implementation also accepts `usage.daily`, `usage.weekly`, `quotas.daily`, and `quotas.weekly`. Missing `used` and `remaining` values are derived when the opposite side plus `limit` is present.
+The implementation still accepts `usage.daily`, `usage.weekly`, `quotas.daily`, and `quotas.weekly`. Missing `used` and `remaining` values are derived when the opposite side plus `limit` is present, and string `used_percent` values are parsed and clamped into the `0..100` range before ranking.
 
 ### Normalized snapshot
 
 Each successful probe is normalized into:
 
-- `dailyRemaining` and `weeklyRemaining`
+- `dailyRemaining` and `weeklyRemaining` as remaining percent values
 - `dailyResetsAt` and `weeklyResetsAt`
 - `dailyPercentUsed` and `weeklyPercentUsed`
 - `status`: `usable`, `not-allowed`, `limit-reached`, or `missing-usage-data`
@@ -155,12 +189,12 @@ Only snapshots with `status = usable` participate in ranking.
 
 The selection code compares usable accounts in this order:
 
-1. Higher `dailyRemaining`
-2. Higher `weeklyRemaining`
+1. Higher primary-window remaining percent
+2. Higher secondary-window remaining percent
 3. Current default account
 4. Stable registry order
 
-This means an account with more daily headroom wins even if another account has better weekly headroom. Weekly remaining is only used as the tie-breaker after daily remaining matches.
+This means an account with more primary-window headroom wins even if another account has better secondary-window headroom. Secondary remaining is only used as the tie-breaker after the primary remaining percentages match.
 
 ### Fallback contract
 
@@ -176,14 +210,15 @@ The fallback is deliberate. The wrapper prefers a predictable default over makin
 
 ### Cache and request headers
 
-The selector stores normalized snapshots in a short-lived cache controlled by `CODEXES_EXPERIMENTAL_SELECTION_CACHE_TTL_MS`. When `CODEXES_EXPERIMENTAL_SELECTION_USE_ACCOUNT_ID_HEADER=1` is enabled and the saved auth state exposes an account id, probes include `OpenAI-Account-ID` to disambiguate which account is being measured.
+The selector stores normalized snapshots in a short-lived cache controlled by `CODEXES_EXPERIMENTAL_SELECTION_CACHE_TTL_MS`. When `CODEXES_EXPERIMENTAL_SELECTION_USE_ACCOUNT_ID_HEADER=1` is enabled and the saved auth state exposes an account id, probes include `OpenAI-Account-ID` to disambiguate which account is being measured. The environment variable names keep the older `EXPERIMENTAL` prefix for compatibility, even though the flow is now the default path.
 
 ### Test coverage
 
 The remaining-limit path is covered by automated tests for:
 
-- ranking by daily then weekly remaining usage
+- ranking by primary then secondary remaining percent
 - cache reuse without refetching
+- the real `rate_limit.primary_window` / `secondary_window` payload shape
 - mixed success and timeout outcomes
 - missing and malformed auth state
 - fully exhausted accounts
@@ -204,6 +239,8 @@ Expected log properties:
 - auth tokens and other raw secrets are not logged
 - runtime paths, selector decisions, lock behavior, and spawn failures are logged with context
 
+The human-readable account summary is regular CLI output on stdout. Structured logs stay separate on stderr and should be treated as diagnostics, not as the primary user-facing explanation of selection behavior.
+
 Useful events:
 
 - `wrapper_config.resolved`
@@ -213,12 +250,27 @@ Useful events:
 - `selection.experimental_enabled`
 - `selection.experimental_ranked`
 - `selection.experimental_selected`
+- `selection.experimental_fallback_selected`
 - `selection.usage_probe.success`
 - `selection.usage_cache.hit`
+- `selection.usage_normalize.percent_resolved`
+- `selection.usage_normalize.percent_clamped`
+- `selection.usage_normalize.status_usable`
 - `selection.experimental_fallback_all_probes_failed`
 - `selection.experimental_fallback_mixed_probe_outcomes`
 - `selection.experimental_fallback_all_accounts_exhausted`
 - `selection.experimental_fallback_ambiguous_usage`
+- `selection.display_only_missing_execution_account`
+- `selection.execution_blocked_missing_default`
+- `selection.summary.start`
+- `selection.summary.complete`
+- `selection.format_summary.start`
+- `selection.format_summary.complete`
+- `root.summary_rendered`
+- `root.selected_account_announced`
+- `root.fallback_announced`
+- `account_list.summary_rendered`
+- `account_list.fallback_announced`
 - `runtime_lock.acquire.timeout`
 - `account_activation.missing_auth`
 - `spawn_codex.complete`
@@ -290,7 +342,7 @@ Fix:
 1. Confirm the account profile still has `state/auth.json` with a current `access_token`.
 2. Retry with `LOG_LEVEL=DEBUG` to inspect per-account probe status, cache hits, and fallback reason.
 3. Re-add any account whose stored auth state is missing or malformed.
-4. If the endpoint is timing out, increase `CODEXES_EXPERIMENTAL_SELECTION_TIMEOUT_MS` or switch back to `manual-default`.
+4. If the endpoint is timing out, increase `CODEXES_EXPERIMENTAL_SELECTION_TIMEOUT_MS` or temporarily override the strategy with `CODEXES_ACCOUNT_SELECTION_STRATEGY=manual-default`.
 
 ### Unexpected experimental fallback
 

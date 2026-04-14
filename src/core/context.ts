@@ -16,6 +16,9 @@ export interface AppContext {
     stdout: NodeJS.WriteStream;
     stderr: NodeJS.WriteStream;
   };
+  output: {
+    stdoutIsTTY: boolean;
+  };
   logging: {
     level: string;
     sink: ReturnType<typeof createLogSink>;
@@ -92,6 +95,9 @@ export async function buildAppContext(
     io: {
       stdout: io.stdout,
       stderr: io.stderr,
+    },
+    output: {
+      stdoutIsTTY: io.stdout.isTTY === true,
     },
     logging: {
       level: logLevel,
