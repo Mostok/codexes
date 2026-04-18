@@ -39,7 +39,8 @@ codexes --help
 
 ```bash
 codexes account add work
-codexes account add personal
+codexes account add personal --paid-at 18.04.2026
+codexes account set-paid-at work 20.04.2026
 codexes account use work
 codexes chat --model gpt-5
 ```
@@ -48,9 +49,11 @@ By default, `codexes` uses the `remaining-limit` selector. It probes `https://ch
 
 If you need compatibility overrides, set `CODEXES_ACCOUNT_SELECTION_STRATEGY` to `manual-default`, `single-account`, or `remaining-limit`. The legacy value `remaining-limit-experimental` is still accepted for backward compatibility.
 
-Before launch, `codexes` prints an English account selection summary that includes every configured account, its current status, primary and secondary remaining percent, whether the data came from `fresh` probing or `cache`, and which account was selected. In interactive terminals the account lines are colorized; in plain-text contexts the same output stays ANSI-free. If probing is incomplete or unreliable, the CLI prints an explicit fallback message instead of silently behaving like `manual-default`.
+Before launch, `codexes` prints a compact English execution summary that includes every configured account, its current status, primary and secondary remaining percent, whether the data came from `fresh` probing or `cache`, and which account was selected. In interactive terminals the execution summary stays colorized; in plain-text contexts it stays ANSI-free. If probing is incomplete or unreliable, the CLI prints an explicit fallback message instead of silently behaving like `manual-default`.
 
-`codexes account list` uses the same summary formatter, but stays diagnostic and read-only. When fallback analysis cannot produce a reliable execution winner and no valid default account is available, `account list` still renders the account table plus an execution note instead of failing. Wrapped execution commands remain strict and still require a concrete selected account before launch.
+`codexes account add` accepts an optional `--paid-at dd.mm.yyyy` flag. The value is normalized to ISO in `account.json` and shown in `codexes account list` under the `Payed at` column. If you need to change that stored date later, use `codexes account set-paid-at <account-id-or-label> <dd.mm.yyyy>`.
+
+`codexes account list` now uses a dedicated diagnostic table with columns for label, account id, `Payed at`, flags, status, remaining percentages, plan, and source. Footer lines under the table still carry `Selected account`, `Fallback`, and `Execution note` diagnostics, so the command remains read-only and informative even when no execution winner exists. Wrapped execution commands remain strict and still use the compact summary contract before launch.
 
 ## Documentation
 

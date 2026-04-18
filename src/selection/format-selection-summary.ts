@@ -4,15 +4,23 @@ import type {
   SelectionSummary,
   SelectionSummaryEntry,
 } from "./selection-summary.js";
+import {
+  renderSelectionSummaryTable,
+  type SelectionSummaryTableColumn,
+} from "./render-selection-summary-table.js";
 
 interface SummaryRenderCapabilities {
   stdoutIsTTY: boolean;
   useColor: boolean;
 }
 
+export type SelectionSummaryRenderVariant = "display-table" | "execution-summary";
+
 export function formatSelectionSummary(input: {
   capabilities: SummaryRenderCapabilities;
   logger: Logger;
+  now?: Date;
+  renderVariant: SelectionSummaryRenderVariant;
   summary: SelectionSummary;
 }): string {
   const renderMode = input.capabilities.useColor ? "color" : "plain";
@@ -24,63 +32,129 @@ export function formatSelectionSummary(input: {
     stdoutIsTTY: input.capabilities.stdoutIsTTY,
     useColor: input.capabilities.useColor,
     renderMode,
+    renderVariant: input.renderVariant,
+    columnSet: input.renderVariant === "display-table"
+      ? ["label", "account", "paidAt", "flags", "status", "5h", "weekly", "plan", "source"]
+      : ["summary-lines"],
+    footerBlocks: ["selected-account", "fallback", "execution-note"],
     fallbackReason: input.summary.fallbackReason,
     selectedAccountId: input.summary.selectedAccount?.id ?? null,
     executionBlockedReason: input.summary.executionBlockedReason,
   });
 
-  const lines = [
-    "Account selection summary:",
-    ...input.summary.entries.map((entry) =>
-      formatSelectionEntry(entry, input.capabilities),
-    ),
-  ];
+  const footerLines = buildFooterLines(input.summary);
+  const renderedBody = input.renderVariant === "display-table"
+    ? renderDisplayTable({
+        capabilities: input.capabilities,
+        footerLines,
+        logger: input.logger,
+        now: input.now ?? new Date(),
+        summary: input.summary,
+      })
+    : renderExecutionSummary({
+        capabilities: input.capabilities,
+        footerLines,
+        summary: input.summary,
+      });
 
-  if (input.summary.selectedAccount && input.summary.selectedBy) {
-    lines.push(
-      `Selected account: ${input.summary.selectedAccount.label} (${input.summary.selectedAccount.id}) via ${describeSelectionMode(input.summary)}.`,
-    );
-  } else {
-    lines.push("Selected account: unavailable for execution.");
-  }
-
-  if (input.summary.fallbackReason) {
-    lines.push(`Fallback: ${describeFallback(input.summary.fallbackReason)}.`);
-  }
-  if (input.summary.executionBlockedReason) {
-    lines.push(`Execution note: ${input.summary.executionBlockedReason}`);
-  }
+  const lineCount = renderedBody.split("\n").length;
 
   input.logger.debug("selection.format_summary.complete", {
     mode: input.summary.mode,
     strategy: input.summary.strategy,
     renderMode,
-    lineCount: lines.length,
+    renderVariant: input.renderVariant,
+    lineCount,
+    columnSet: input.renderVariant === "display-table"
+      ? ["label", "account", "paidAt", "flags", "status", "5h", "weekly", "plan", "source"]
+      : ["summary-lines"],
     fallbackIncluded: input.summary.fallbackReason !== null,
+    footerIncluded: {
+      executionNote: input.summary.executionBlockedReason !== null,
+      fallback: input.summary.fallbackReason !== null,
+      selectedAccount: true,
+    },
     selectedAccountId: input.summary.selectedAccount?.id ?? null,
     executionBlockedReason: input.summary.executionBlockedReason,
   });
 
-  return `${lines.join("\n")}\n`;
+  return `${renderedBody}\n`;
+}
+
+function renderDisplayTable(input: {
+  capabilities: SummaryRenderCapabilities;
+  footerLines: string[];
+  logger: Logger;
+  now: Date;
+  summary: SelectionSummary;
+}): string {
+  const columns: SelectionSummaryTableColumn[] = [
+    { header: "Label", key: "label" },
+    { header: "Account ID", key: "account" },
+    { header: "Payed at", key: "paidAt" },
+    { header: "Flags", key: "flags" },
+    { header: "Status", key: "status" },
+    { align: "right", header: "5h", key: "fiveHour" },
+    { align: "right", header: "Weekly", key: "weekly" },
+    { header: "Plan", key: "plan" },
+    { header: "Source", key: "source" },
+  ];
+
+  return [
+    "Account selection summary:",
+    renderSelectionSummaryTable({
+      capabilities: input.capabilities,
+      columns,
+      footerLines: input.footerLines,
+      logger: input.logger,
+      rows: input.summary.entries.map((entry) =>
+        formatSelectionTableRow(entry, input.capabilities, input.logger)
+      ),
+    }),
+  ].join("\n");
+}
+
+function renderExecutionSummary(input: {
+  capabilities: SummaryRenderCapabilities;
+  footerLines: string[];
+  summary: SelectionSummary;
+}): string {
+  return [
+    "Account selection summary:",
+    ...input.summary.entries.map((entry) =>
+      formatSelectionEntry(entry, input.capabilities),
+    ),
+    ...input.footerLines,
+  ].join("\n");
+}
+
+function buildFooterLines(summary: SelectionSummary): string[] {
+  const lines: string[] = [];
+  if (summary.selectedAccount && summary.selectedBy) {
+    lines.push(
+      `Selected account: ${summary.selectedAccount.label} (${summary.selectedAccount.id}) via ${describeSelectionMode(summary)}.`,
+    );
+  } else {
+    lines.push("Selected account: unavailable for execution.");
+  }
+
+  if (summary.fallbackReason) {
+    lines.push(`Fallback: ${describeFallback(summary.fallbackReason)}.`);
+  }
+  if (summary.executionBlockedReason) {
+    lines.push(`Execution note: ${summary.executionBlockedReason}`);
+  }
+
+  return lines;
 }
 
 function formatSelectionEntry(
   entry: SelectionSummaryEntry,
   capabilities: SummaryRenderCapabilities,
 ): string {
-  const tags = [
-    entry.isSelected ? "selected" : null,
-    entry.isDefault ? "default" : null,
-    entry.rankingPosition !== null ? `rank #${entry.rankingPosition}` : null,
-  ]
-    .filter((value): value is string => value !== null)
-    .join(", ");
-
-  const status = entry.snapshot?.status ?? (entry.failureCategory ? "probe-failed" : "not-probed");
-  const detail =
-    entry.failureMessage ??
-    entry.snapshot?.statusReason ??
-    "usage probing was not required for this strategy";
+  const tags = formatSelectionTags(entry);
+  const status = resolveStatus(entry);
+  const detail = resolveDetail(entry);
 
   return [
     "-",
@@ -97,6 +171,96 @@ function formatSelectionEntry(
   ]
     .filter((value): value is string => value !== null)
     .join(" ");
+}
+
+function formatSelectionTableRow(
+  entry: SelectionSummaryEntry,
+  capabilities: SummaryRenderCapabilities,
+  logger: Logger,
+): Record<string, string> {
+  const status = resolveStatus(entry);
+
+  return {
+    account: entry.account.id,
+    fiveHour: colorize(
+      capabilities,
+      mapRemainingTone(entry.snapshot?.dailyRemaining ?? null),
+      formatPercent(entry.snapshot?.dailyRemaining ?? null),
+    ),
+    flags: formatSelectionTags(entry) || "-",
+    label: entry.account.label,
+    paidAt: formatPaidAt(entry, logger),
+    plan: entry.snapshot?.plan
+      ? colorize(capabilities, "planValue", entry.snapshot.plan)
+      : "-",
+    source: colorize(capabilities, "source", entry.source),
+    status: colorize(capabilities, mapStatusTone(status), status),
+    weekly: colorize(
+      capabilities,
+      mapRemainingTone(entry.snapshot?.weeklyRemaining ?? null),
+      formatPercent(entry.snapshot?.weeklyRemaining ?? null),
+    ),
+  };
+}
+
+function formatPaidAt(
+  entry: SelectionSummaryEntry,
+  logger: Logger,
+): string {
+  logger.debug("selection.format_paid_at.start", {
+    accountId: entry.account.id,
+    paidAt: entry.paidAt,
+    label: entry.account.label,
+  });
+
+  if (!entry.paidAt.displayValue || !entry.paidAt.isoValue) {
+    logger.debug("selection.format_paid_at.complete", {
+      accountId: entry.account.id,
+      formattedPaidAt: "-",
+      source: "missing",
+    });
+    return "-";
+  }
+
+  const normalizedDate = new Date(entry.paidAt.isoValue);
+  if (Number.isNaN(normalizedDate.getTime())) {
+    logger.warn("selection.format_paid_at.invalid", {
+      accountId: entry.account.id,
+      paidAt: entry.paidAt,
+      label: entry.account.label,
+    });
+    return "-";
+  }
+
+  logger.debug("selection.format_paid_at.complete", {
+    accountId: entry.account.id,
+    formattedPaidAt: entry.paidAt.displayValue,
+    source: entry.paidAt.source,
+  });
+
+  return entry.paidAt.displayValue;
+}
+
+function formatSelectionTags(entry: SelectionSummaryEntry): string {
+  return [
+    entry.isSelected ? "selected" : null,
+    entry.isDefault ? "default" : null,
+    entry.rankingPosition !== null ? `rank #${entry.rankingPosition}` : null,
+  ]
+    .filter((value): value is string => value !== null)
+    .join(", ");
+}
+
+function resolveStatus(entry: SelectionSummaryEntry): string {
+  return entry.snapshot?.status ?? (entry.failureCategory ? "probe-failed" : "not-probed");
+}
+
+function resolveDetail(entry: SelectionSummaryEntry): string {
+  return (
+    entry.failureMessage ??
+    entry.snapshot?.statusReason ??
+    "usage probing was not required for this strategy"
+  );
 }
 
 function formatPercent(value: number | null): string {

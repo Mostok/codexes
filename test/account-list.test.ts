@@ -56,7 +56,8 @@ test("account list renders english limit summaries and reuses cached probe data"
 
   assert.equal(await runAccountListCommand(firstContext), 0);
   assert.match(firstOutput.join(""), /Account selection summary:/);
-  assert.match(firstOutput.join(""), /personal .*status=usable .*5h=5% .*weekly=7% .*plan=pro .*source=fresh .*detail=rankable/);
+  assert.match(firstOutput.join(""), /\| Label +\| Account ID +\| Payed at +\| Flags +\| Status +\| +5h +\| +Weekly +\| Plan +\| Source +\|/);
+  assert.match(firstOutput.join(""), /\| personal +\| .* \| 05\.05\.2026 +\| selected, rank #1 +\| usable +\| +5% +\| +7% +\| pro +\| fresh +\|/);
   assert.match(firstOutput.join(""), /Selected account: personal/);
   assert.doesNotMatch(firstOutput.join(""), /\u001b\[/);
 
@@ -75,8 +76,20 @@ test("account list renders english limit summaries and reuses cached probe data"
   });
 
   assert.equal(await runAccountListCommand(secondContext), 0);
-  assert.match(secondOutput.join(""), /source=cache/);
+  assert.match(secondOutput.join(""), /\| cache +\|/);
   assertEvent(setup.events, "account_list.summary_rendered", "info");
+  assert.equal(
+    findEvent(setup.events, "account_list.summary_rendered", "info")?.details?.renderVariant,
+    "display-table",
+  );
+  assert.equal(
+    findEvent(setup.events, "account_list.selection.format_summary.start", "debug")?.details?.renderVariant,
+    "display-table",
+  );
+  assert.equal(
+    findEvent(setup.events, "account_list.selection.render_table.complete", "debug")?.details?.renderStyle,
+    "plain",
+  );
 });
 
 test("selection formatter adds ANSI color only for TTY-capable output", async (t) => {
@@ -116,6 +129,7 @@ test("selection formatter adds ANSI color only for TTY-capable output", async (t
       useColor: false,
     },
     logger,
+    renderVariant: "display-table",
     summary,
   });
   const colorRendered = formatSelectionSummary({
@@ -124,16 +138,110 @@ test("selection formatter adds ANSI color only for TTY-capable output", async (t
       useColor: true,
     },
     logger,
+    renderVariant: "display-table",
     summary,
   });
 
   assert.doesNotMatch(plainRendered, /\u001b\[/);
   assert.match(colorRendered, /\u001b\[/);
-  assert.match(colorRendered, /5h.*85%/);
-  assert.match(colorRendered, /weekly.*90%/);
-  assert.match(colorRendered, /plan.*pro/);
+  assert.match(colorRendered, /\| Label +\| Account ID +\| Payed at +\| Flags +\| Status +\| +5h +\| +Weekly +\| Plan +\| Source +\|/);
+  assert.match(colorRendered, /\| personal +\| .* \| 05\.05\.2026 +\| selected, rank #1 +\| \u001b\[32musable\u001b\[0m +\|/);
   assert.match(colorRendered, /\u001b\[33m30%/);
   assert.match(colorRendered, /\u001b\[32m85%/);
+  assert.match(colorRendered, /\u001b\[1;95mpro\u001b\[0m/);
+});
+
+test("selection formatter renders paid date values and invalid metadata safely", async () => {
+  const { logger } = createTestLogger();
+
+  const rendered = formatSelectionSummary({
+    capabilities: {
+      stdoutIsTTY: false,
+      useColor: false,
+    },
+    logger,
+    now: new Date("2026-04-18T00:00:00.000Z"),
+    renderVariant: "display-table",
+    summary: {
+      entries: [
+        {
+          account: {
+            authDirectory: "/tmp/acct-1",
+            createdAt: "2026-04-01T00:00:00.000Z",
+            id: "acct-1",
+            label: "missing-date",
+            lastUsedAt: null,
+            updatedAt: "2026-04-01T00:00:00.000Z",
+          },
+          failureCategory: null,
+          failureMessage: null,
+          isDefault: false,
+          isEligibleForRanking: false,
+          isSelected: false,
+          rankingPosition: null,
+          snapshot: null,
+          source: "unavailable",
+          paidAt: { displayValue: null, isoValue: null, source: "missing" },
+        },
+        {
+          account: {
+            authDirectory: "/tmp/acct-2",
+            createdAt: "2026-04-01T00:00:00.000Z",
+            id: "acct-2",
+            label: "bad-date",
+            lastUsedAt: null,
+            updatedAt: "2026-04-01T00:00:00.000Z",
+          },
+          failureCategory: null,
+          failureMessage: null,
+          isDefault: false,
+          isEligibleForRanking: false,
+          isSelected: false,
+          rankingPosition: null,
+          snapshot: null,
+          source: "unavailable",
+          paidAt: {
+            displayValue: "20.04.2026",
+            isoValue: "not-a-date",
+            source: "metadata.subscriptionPaidAt",
+          },
+        },
+        {
+          account: {
+            authDirectory: "/tmp/acct-3",
+            createdAt: "2026-04-01T00:00:00.000Z",
+            id: "acct-3",
+            label: "legacy",
+            lastUsedAt: null,
+            updatedAt: "2026-04-01T00:00:00.000Z",
+          },
+          paidAt: {
+            displayValue: "20.04.2026",
+            isoValue: "2026-04-20T00:00:00.000Z",
+            source: "metadata.subscriptionAcquiredAt",
+          },
+          failureCategory: null,
+          failureMessage: null,
+          isDefault: false,
+          isEligibleForRanking: false,
+          isSelected: false,
+          rankingPosition: null,
+          snapshot: null,
+          source: "unavailable",
+        },
+      ],
+      executionBlockedReason: null,
+      fallbackReason: null,
+      mode: "display-only",
+      selectedAccount: null,
+      selectedBy: null,
+      strategy: "manual-default",
+    },
+  });
+
+  assert.match(rendered, /\| missing-date +\| acct-1 +\| - +\| - +\| not-probed +\|/);
+  assert.match(rendered, /\| bad-date +\| acct-2 +\| - +\| - +\| not-probed +\|/);
+  assert.match(rendered, /\| legacy +\| acct-3 +\| 20\.04\.2026 +\| - +\| not-probed +\|/);
 });
 
 test("display-only selection summary explains mixed probe fallback without an execution winner", async (t) => {
@@ -179,6 +287,7 @@ test("display-only selection summary explains mixed probe fallback without an ex
       useColor: false,
     },
     logger,
+    renderVariant: "display-table",
     summary,
   });
   assert.match(
@@ -187,8 +296,8 @@ test("display-only selection summary explains mixed probe fallback without an ex
   );
   assert.match(rendered, /Selected account: unavailable for execution\./);
   assert.match(rendered, /Execution note: Multiple accounts are configured but no default account is selected\./);
-  assert.match(rendered, /work .*status=usable .*5h=3% .*weekly=8% .*plan=free .*detail=rankable/);
-  assert.match(rendered, /personal .*status=probe-failed .*5h=unknown .*weekly=unknown .*detail=probe-timeout/);
+  assert.match(rendered, /\| work +\| .* \| 04\.05\.2026 +\| - +\| usable +\| +3% +\| +8% +\| free +\| fresh +\|/);
+  assert.match(rendered, /\| personal +\| .* \| 05\.05\.2026 +\| - +\| probe-failed +\| +unknown +\| +unknown +\| - +\| fresh +\|/);
   assertEvent(events, "selection.display_only_missing_execution_account", "info");
 });
 
@@ -223,6 +332,7 @@ test("display-only selection summary explains all-probes-failed fallback without
       useColor: false,
     },
     logger,
+    renderVariant: "display-table",
     summary,
   });
   assert.match(
@@ -230,7 +340,8 @@ test("display-only selection summary explains all-probes-failed fallback without
     /Fallback: every account probe failed, so codexes could not establish a reliable execution winner\./,
   );
   assert.match(rendered, /Selected account: unavailable for execution\./);
-  assert.match(rendered, /status=probe-failed .*detail=probe-timeout/);
+  assert.match(rendered, /\| work +\| .* \| 04\.05\.2026 +\| - +\| probe-failed +\| +unknown +\| +unknown +\| - +\| fresh +\|/);
+  assert.match(rendered, /\| personal +\| .* \| 05\.05\.2026 +\| - +\| probe-failed +\| +unknown +\| +unknown +\| - +\| fresh +\|/);
   assertEvent(events, "selection.display_only_missing_execution_account", "info");
 });
 
@@ -266,9 +377,15 @@ async function createAccountListFixture(tempRoot: string): Promise<{
     accessToken: "token-work",
     accountId: work.id,
   });
+  await writeAccountMetadata(work, {
+    subscriptionPaidAt: "2026-05-04T00:00:00.000Z",
+  });
   await writeAccountState(personal, {
     accessToken: "token-personal",
     accountId: personal.id,
+  });
+  await writeAccountMetadata(personal, {
+    subscriptionPaidAt: "2026-05-05T00:00:00.000Z",
   });
   return {
     cacheFilePath,
@@ -278,6 +395,14 @@ async function createAccountListFixture(tempRoot: string): Promise<{
     sharedCodexHome,
     work,
   };
+}
+
+function findEvent(
+  events: LoggedEvent[],
+  event: string,
+  level?: LoggedEvent["level"],
+): LoggedEvent | undefined {
+  return events.find((entry) => entry.event === event && (!level || entry.level === level));
 }
 
 function createStubRegistry(accounts: AccountRecord[]): AccountRegistry {
@@ -290,6 +415,9 @@ function createStubRegistry(accounts: AccountRecord[]): AccountRegistry {
     },
     async listAccounts() {
       return accounts;
+    },
+    async renameAccount() {
+      throw new Error("not implemented");
     },
     async removeAccount() {
       throw new Error("not implemented");
@@ -402,6 +530,32 @@ async function writeAccountState(
           access_token: input.accessToken,
           account_id: input.accountId,
         },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+}
+
+async function writeAccountMetadata(
+  account: AccountRecord,
+  input: Record<string, unknown>,
+): Promise<void> {
+  await mkdir(account.authDirectory, { recursive: true });
+  await writeFile(
+    path.join(account.authDirectory, "account.json"),
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        accountId: account.id,
+        label: account.label,
+        capturedAt: "2026-04-13T00:00:00.000Z",
+        authMode: "chatgpt",
+        authAccountId: account.id,
+        lastRefresh: "2026-04-13T00:00:00.000Z",
+        loginStatus: "succeeded",
+        ...input,
       },
       null,
       2,

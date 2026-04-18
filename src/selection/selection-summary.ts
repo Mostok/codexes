@@ -1,3 +1,7 @@
+import {
+  buildAccountPresentations,
+  type AccountPaidAt,
+} from "../accounts/account-resolution.js";
 import type { AccountRecord, AccountRegistry } from "../accounts/account-registry.js";
 import type {
   AccountSelectionStrategy,
@@ -25,6 +29,7 @@ export type SelectionSummaryMode = "display-only" | "execution";
 
 export interface SelectionSummaryEntry {
   account: AccountRecord;
+  paidAt: AccountPaidAt;
   failureCategory: UsageProbeFailureCategory | null;
   failureMessage: string | null;
   isDefault: boolean;
@@ -56,11 +61,24 @@ export async function resolveSelectionSummary(input: {
 }): Promise<SelectionSummary> {
   const mode = input.mode ?? "execution";
   const accounts = await input.registry.listAccounts();
+  const accountPresentations = await buildAccountPresentations({
+    accounts,
+    logger: input.logger,
+  });
+  const paidAtByAccountId = new Map(
+    accountPresentations.map((presentation) => [
+      presentation.account.id,
+      presentation.paidAt,
+    ]),
+  );
 
   input.logger.info("selection.summary.start", {
     mode,
     strategy: input.strategy,
     accountCount: accounts.length,
+    paidAtCount: accountPresentations.filter(
+      (presentation) => presentation.paidAt.isoValue !== null,
+    ).length,
   });
 
   if (accounts.length === 0) {
@@ -74,6 +92,7 @@ export async function resolveSelectionSummary(input: {
   const defaultAccount = await input.registry.getDefaultAccount();
   const summary = await resolveStrategySummary({
     accounts,
+    paidAtByAccountId,
     defaultAccount,
     experimentalSelection: input.experimentalSelection,
     fetchImpl: input.fetchImpl,
@@ -107,12 +126,27 @@ async function resolveStrategySummary(input: {
   registry: AccountRegistry;
   selectionCacheFilePath?: string;
   strategy: AccountSelectionStrategy;
+  paidAtByAccountId: Map<string, AccountPaidAt>;
 }): Promise<SelectionSummary> {
   switch (input.strategy) {
     case "manual-default":
-      return buildManualDefaultSummary(input.registry, input.logger, input.accounts, input.defaultAccount, input.mode);
+      return buildManualDefaultSummary(
+        input.registry,
+        input.logger,
+        input.accounts,
+        input.defaultAccount,
+        input.mode,
+        input.paidAtByAccountId,
+      );
     case "single-account":
-      return buildSingleAccountSummary(input.registry, input.logger, input.accounts, input.defaultAccount, input.mode);
+      return buildSingleAccountSummary(
+        input.registry,
+        input.logger,
+        input.accounts,
+        input.defaultAccount,
+        input.mode,
+        input.paidAtByAccountId,
+      );
     case "remaining-limit":
     case "remaining-limit-experimental":
       return buildExperimentalSummary(input);
@@ -125,6 +159,7 @@ async function buildManualDefaultSummary(
   accounts: AccountRecord[],
   defaultAccount: AccountRecord | null,
   mode: SelectionSummaryMode,
+  paidAtByAccountId: Map<string, AccountPaidAt>,
 ): Promise<SelectionSummary> {
   const selection = await resolveManualDefaultSelection({
     accounts,
@@ -135,7 +170,12 @@ async function buildManualDefaultSummary(
   });
 
   return {
-    entries: createUnavailableEntries(accounts, defaultAccount, selection.selectedAccount),
+    entries: createUnavailableEntries(
+      accounts,
+      defaultAccount,
+      selection.selectedAccount,
+      paidAtByAccountId,
+    ),
     executionBlockedReason: selection.executionBlockedReason,
     fallbackReason: null,
     mode,
@@ -151,11 +191,17 @@ async function buildSingleAccountSummary(
   accounts: AccountRecord[],
   defaultAccount: AccountRecord | null,
   mode: SelectionSummaryMode,
+  paidAtByAccountId: Map<string, AccountPaidAt>,
 ): Promise<SelectionSummary> {
   const selectedAccount = await selectSingleAccountOnly(registry, logger, accounts, mode);
 
   return {
-    entries: createUnavailableEntries(accounts, defaultAccount, selectedAccount),
+    entries: createUnavailableEntries(
+      accounts,
+      defaultAccount,
+      selectedAccount,
+      paidAtByAccountId,
+    ),
     executionBlockedReason: null,
     fallbackReason: null,
     mode,
@@ -175,6 +221,7 @@ async function buildExperimentalSummary(input: {
   registry: AccountRegistry;
   selectionCacheFilePath?: string;
   strategy: AccountSelectionStrategy;
+  paidAtByAccountId: Map<string, AccountPaidAt>;
 }): Promise<SelectionSummary> {
   if (!input.experimentalSelection?.enabled || !input.selectionCacheFilePath) {
     input.logger.warn("selection.experimental_config_missing", {
@@ -193,7 +240,12 @@ async function buildExperimentalSummary(input: {
     });
 
     return {
-      entries: createUnavailableEntries(input.accounts, input.defaultAccount, fallbackSelection.selectedAccount),
+      entries: createUnavailableEntries(
+        input.accounts,
+        input.defaultAccount,
+        fallbackSelection.selectedAccount,
+        input.paidAtByAccountId,
+      ),
       executionBlockedReason: fallbackSelection.executionBlockedReason,
       fallbackReason: "experimental-config-missing",
       mode: input.mode,
@@ -250,6 +302,7 @@ async function buildExperimentalSummary(input: {
         probeResults,
         selectedAccount: fallbackSelection.selectedAccount,
         selectedCandidateIds: [],
+        paidAtByAccountId: input.paidAtByAccountId,
       }),
       executionBlockedReason: fallbackSelection.executionBlockedReason,
       fallbackReason,
@@ -335,6 +388,7 @@ async function buildExperimentalSummary(input: {
         probeResults,
         selectedAccount: fallbackSelection.selectedAccount,
         selectedCandidateIds: [],
+        paidAtByAccountId: input.paidAtByAccountId,
       }),
       executionBlockedReason: fallbackSelection.executionBlockedReason,
       fallbackReason,
@@ -362,6 +416,7 @@ async function buildExperimentalSummary(input: {
       probeResults,
       selectedAccount: selected.account,
       selectedCandidateIds: candidates.map((entry) => entry.account.id),
+      paidAtByAccountId: input.paidAtByAccountId,
     }),
     executionBlockedReason: null,
     fallbackReason: null,
@@ -500,9 +555,15 @@ function createUnavailableEntries(
   accounts: AccountRecord[],
   defaultAccount: AccountRecord | null,
   selectedAccount: AccountRecord | null,
+  paidAtByAccountId: Map<string, AccountPaidAt>,
 ): SelectionSummaryEntry[] {
   return accounts.map((account) => ({
     account,
+    paidAt: paidAtByAccountId.get(account.id) ?? {
+      displayValue: null,
+      isoValue: null,
+      source: "summary-missing",
+    },
     failureCategory: null,
     failureMessage: null,
     isDefault: account.id === defaultAccount?.id,
@@ -519,9 +580,15 @@ function createExperimentalEntries(input: {
   probeResults: AccountUsageResolution[];
   selectedAccount: AccountRecord | null;
   selectedCandidateIds: string[];
+  paidAtByAccountId: Map<string, AccountPaidAt>;
 }): SelectionSummaryEntry[] {
   return input.probeResults.map((entry) => ({
     account: entry.account,
+    paidAt: input.paidAtByAccountId.get(entry.account.id) ?? {
+      displayValue: null,
+      isoValue: null,
+      source: "summary-missing",
+    },
     failureCategory: entry.ok ? null : entry.category,
     failureMessage: entry.ok ? null : entry.message,
     isDefault: entry.account.id === input.defaultAccount?.id,

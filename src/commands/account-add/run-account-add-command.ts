@@ -16,12 +16,17 @@ import {
   runInteractiveCodexLogin,
   type CodexLoginResult,
 } from "../../process/run-codex-login.js";
+import { parseAccountPaidDate } from "../../accounts/account-paid-date.js";
 
 const DEFAULT_LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
 const ACCOUNT_METADATA_SCHEMA_VERSION = 1;
 
 interface ParsedAccountAddArgs {
   label: string;
+  paidAt: {
+    displayValue: string;
+    isoValue: string;
+  } | null;
   timeoutMs: number;
 }
 
@@ -30,6 +35,7 @@ interface AccountAuthMetadata {
   accountId: string;
   label: string;
   capturedAt: string;
+  subscriptionPaidAt: string | null;
   authMode: string | null;
   authAccountId: string | null;
   lastRefresh: string | null;
@@ -50,10 +56,12 @@ export async function runAccountAddCommand(
     logger.info("help.rendered");
     return 0;
   }
-  const parsed = parseAccountAddArgs(argv);
+  const parsed = parseAccountAddArgs(argv, logger);
 
   logger.info("command.start", {
     requestedLabel: parsed.label,
+    requestedPaidAt: parsed.paidAt?.displayValue ?? null,
+    normalizedPaidAtIso: parsed.paidAt?.isoValue ?? null,
     timeoutMs: parsed.timeoutMs,
     codexBinaryPath: context.codexBinary.path,
     sharedCodexHome: context.paths.sharedCodexHome,
@@ -160,6 +168,7 @@ export async function runAccountAddCommand(
         destinationFile: runtimePaths.accountMetadataFile,
         label: account.label,
         logger,
+        paidAtIso: parsed.paidAt?.isoValue ?? null,
         recordId: account.id,
         summary: authSummary,
       });
@@ -176,6 +185,7 @@ export async function runAccountAddCommand(
           `Added account "${account.label}"`,
           `  id: ${account.id}`,
           `  auth state: ${runtimePaths.accountStateDirectory}`,
+          parsed.paidAt ? `  payed at: ${parsed.paidAt.displayValue}` : null,
           authSummary.accountId ? `  auth account id: ${authSummary.accountId}` : null,
         ]
           .filter((line): line is string => Boolean(line))
@@ -196,8 +206,12 @@ export async function runAccountAddCommand(
   }
 }
 
-function parseAccountAddArgs(argv: string[]): ParsedAccountAddArgs {
+function parseAccountAddArgs(
+  argv: string[],
+  logger: ReturnType<typeof createLogger>,
+): ParsedAccountAddArgs {
   let label: string | null = null;
+  let paidAt: ParsedAccountAddArgs["paidAt"] = null;
   let timeoutMs = DEFAULT_LOGIN_TIMEOUT_MS;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -220,6 +234,20 @@ function parseAccountAddArgs(argv: string[]): ParsedAccountAddArgs {
       continue;
     }
 
+    if (token === "--paid-at") {
+      const next = argv[index + 1];
+      if (!next) {
+        throw new Error("Expected a date after --paid-at.");
+      }
+      paidAt = parseAccountPaidDate({
+        logger,
+        rawValue: next,
+        source: "--paid-at",
+      });
+      index += 1;
+      continue;
+    }
+
     if (token.startsWith("--timeout-ms=")) {
       const raw = token.slice("--timeout-ms=".length);
       const parsedTimeout = Number.parseInt(raw, 10);
@@ -227,6 +255,15 @@ function parseAccountAddArgs(argv: string[]): ParsedAccountAddArgs {
         throw new Error(`Invalid timeout: ${raw}`);
       }
       timeoutMs = parsedTimeout;
+      continue;
+    }
+
+    if (token.startsWith("--paid-at=")) {
+      paidAt = parseAccountPaidDate({
+        logger,
+        rawValue: token.slice("--paid-at=".length),
+        source: "--paid-at",
+      });
       continue;
     }
 
@@ -245,16 +282,17 @@ function parseAccountAddArgs(argv: string[]): ParsedAccountAddArgs {
     throw new Error(buildAccountAddHelpText());
   }
 
-  return { label, timeoutMs };
+  return { label, paidAt, timeoutMs };
 }
 
 function buildAccountAddHelpText(): string {
   return [
     "Usage:",
-    "  codexes account add <label> [--timeout-ms <milliseconds>]",
+    "  codexes account add <label> [--paid-at <dd.mm.yyyy>] [--timeout-ms <milliseconds>]",
     "",
     "Examples:",
     "  codexes account add work",
+    "  codexes account add personal --paid-at 18.04.2026",
     "  codexes account add personal --timeout-ms 900000",
   ].join("\n");
 }
@@ -322,6 +360,7 @@ async function writeAccountMetadata(input: {
   destinationFile: string;
   label: string;
   logger: ReturnType<typeof createLogger>;
+  paidAtIso: string | null;
   recordId: string;
   summary: {
     authMode: string | null;
@@ -334,6 +373,7 @@ async function writeAccountMetadata(input: {
     accountId: input.recordId,
     label: input.label,
     capturedAt: input.capturedAt,
+    subscriptionPaidAt: input.paidAtIso,
     authMode: input.summary.authMode,
     authAccountId: input.summary.accountId,
     lastRefresh: input.summary.lastRefresh,
@@ -346,6 +386,8 @@ async function writeAccountMetadata(input: {
     destinationFile: input.destinationFile,
     accountId: metadata.accountId,
     authAccountId: metadata.authAccountId,
+    subscriptionPaidAt: metadata.subscriptionPaidAt,
+    paidDateProvided: metadata.subscriptionPaidAt !== null,
   });
 }
 
