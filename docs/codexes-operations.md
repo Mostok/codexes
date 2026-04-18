@@ -133,7 +133,7 @@ The selector treats `wham/usage` as a best-effort signal. It is useful for routi
 
 ## User-Facing Summary Output
 
-Before `codexes` launches the real `codex` binary, and when you run `codexes account list`, the CLI prints the same English summary:
+Before `codexes` launches the real `codex` binary, the CLI prints a compact English execution summary:
 
 - every configured account
 - the normalized usage status (`usable`, `limit-reached`, `not-allowed`, `missing-usage-data`, or `probe-failed`)
@@ -142,7 +142,21 @@ Before `codexes` launches the real `codex` binary, and when you run `codexes acc
 - data source: `fresh`, `cache`, or `unavailable`
 - the selected account and the selection mode that produced it
 
-Each account now renders on one compact line. In TTY mode the formatter adds ANSI color for tags, statuses, and source markers. In non-interactive output the formatter emits the same content without ANSI sequences.
+Each account renders on one compact line. In TTY mode the formatter adds ANSI color for tags, statuses, and source markers. In non-interactive output the formatter emits the same content without ANSI sequences.
+
+When you run `codexes account list`, the CLI now renders a dedicated display-only table instead of reusing the execution-line formatter. The table keeps the same diagnostics, but presents them in explicit columns:
+
+- `Label`
+- `Account ID`
+- `Flags` (`selected`, `default`, `rank #...`)
+- `Status`
+- `5h`
+- `Weekly`
+- `Plan`
+- `Source`
+- `Detail`
+
+The table keeps ASCII borders in both TTY and non-TTY output so alignment stays stable in logs and pasted terminal output. In TTY mode, status and quota cells still receive ANSI color. Footer lines under the table continue to announce `Selected account`, `Fallback`, and `Execution note` details.
 
 When remaining-limit probing cannot produce a reliable winner, the CLI prints an explicit fallback line. Typical fallback messages cover:
 
@@ -153,9 +167,9 @@ When remaining-limit probing cannot produce a reliable winner, the CLI prints an
 
 `fresh` means the account was probed during the current command. `cache` means the CLI reused a still-valid cached snapshot from the short-lived selection cache.
 
-For `codexes account list`, the summary is display-only. If fallback analysis cannot resolve a valid execution account and there is no default account to fall back to, the command still renders the account diagnostics, prints `Selected account: unavailable for execution.`, and includes an `Execution note:` line explaining why launch would be blocked.
+For `codexes account list`, the summary is display-only. If fallback analysis cannot resolve a valid execution account and there is no default account to fall back to, the command still renders the diagnostic table, prints `Selected account: unavailable for execution.`, and includes an `Execution note:` line explaining why launch would be blocked.
 
-For wrapped execution commands such as `codexes chat`, the contract stays strict: no account is launched unless the selector resolves a concrete execution winner.
+For wrapped execution commands such as `codexes chat`, the contract stays strict and compact: no account is launched unless the selector resolves a concrete execution winner, and the wrapped launch path does not switch to the table layout.
 
 ### Payload fields used for ranking
 
@@ -223,6 +237,8 @@ The remaining-limit path is covered by automated tests for:
 - missing and malformed auth state
 - fully exhausted accounts
 - invalid response payloads and corrupt cache files
+- display-only account-list table rendering in plain and TTY modes
+- execution summary regression coverage to prevent table formatting from leaking into wrapped launches
 - root command launch with experimentally selected account activation
 
 ## Logging

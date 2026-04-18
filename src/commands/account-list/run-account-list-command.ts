@@ -47,11 +47,13 @@ export async function runAccountListCommand(context: AppContext): Promise<number
       useColor: context.output.stdoutIsTTY,
     },
     logger,
+    renderVariant: "display-table",
     summary,
   });
   context.io.stdout.write(formattedSummary);
   logger.info("summary_rendered", {
     mode: summary.mode,
+    renderVariant: "display-table",
     strategy: summary.strategy,
     useColor: context.output.stdoutIsTTY,
     selectedAccountId: summary.selectedAccount?.id ?? null,

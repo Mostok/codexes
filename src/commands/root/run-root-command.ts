@@ -7,6 +7,8 @@ import {
 } from "../../runtime/runtime-contract.js";
 import { runAccountAddCommand } from "../account-add/run-account-add-command.js";
 import { runAccountListCommand } from "../account-list/run-account-list-command.js";
+import { runAccountRenameCommand } from "../account-rename/run-account-rename-command.js";
+import { runAccountSetPaidAtCommand } from "../account-set-paid-at/run-account-set-paid-at-command.js";
 import { runAccountRemoveCommand } from "../account-remove/run-account-remove-command.js";
 import { runAccountUseCommand } from "../account-use/run-account-use-command.js";
 import { acquireRuntimeLock } from "../../runtime/lock/runtime-lock.js";
@@ -88,6 +90,22 @@ export async function runRootCommand(context: AppContext): Promise<number> {
     return runAccountRemoveCommand(context, context.argv.slice(2));
   }
 
+  if (context.argv[0] === "account" && context.argv[1] === "rename") {
+    logger.info("command.dispatch", {
+      command: "account rename",
+      argv: context.argv.slice(2),
+    });
+    return runAccountRenameCommand(context, context.argv.slice(2));
+  }
+
+  if (context.argv[0] === "account" && context.argv[1] === "set-paid-at") {
+    logger.info("command.dispatch", {
+      command: "account set-paid-at",
+      argv: context.argv.slice(2),
+    });
+    return runAccountSetPaidAtCommand(context, context.argv.slice(2));
+  }
+
   if (context.argv[0] === "account" && context.argv[1] === "use") {
     logger.info("command.dispatch", {
       command: "account use",
@@ -160,11 +178,13 @@ export async function runRootCommand(context: AppContext): Promise<number> {
       useColor: context.output.stdoutIsTTY,
     },
     logger,
+    renderVariant: "execution-summary",
     summary: selectionSummary,
   });
   context.io.stdout.write(formattedSummary);
   logger.info("summary_rendered", {
     mode: selectionSummary.mode,
+    renderVariant: "execution-summary",
     strategy: selectionSummary.strategy,
     useColor: context.output.stdoutIsTTY,
     selectedAccountId: activeAccount.id,
@@ -232,8 +252,10 @@ function buildHelpText(): string {
     "",
     "Usage:",
     "  codexes [args...]",
-    "  codexes account add <label> [--timeout-ms <milliseconds>]",
+    "  codexes account add <label> [--paid-at <dd.mm.yyyy>] [--timeout-ms <milliseconds>]",
     "  codexes account list",
+    "  codexes account rename <account-id-or-label> <new-label>",
+    "  codexes account set-paid-at <account-id-or-label> <dd.mm.yyyy>",
     "  codexes account use <account-id-or-label>",
     "  codexes account remove <account-id-or-label>",
     "",

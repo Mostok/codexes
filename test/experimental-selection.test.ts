@@ -10,7 +10,9 @@ import {
 import { runRootCommand } from "../src/commands/root/run-root-command.js";
 import type { ExperimentalSelectionConfig } from "../src/config/wrapper-config.js";
 import type { AppContext } from "../src/core/context.js";
+import { formatSelectionSummary } from "../src/selection/format-selection-summary.js";
 import { selectAccountForExecution } from "../src/selection/select-account.js";
+import { resolveSelectionSummary } from "../src/selection/selection-summary.js";
 import {
   assertEvent,
   createCodexShim,
@@ -309,6 +311,59 @@ test("experimental execution stays blocking when fallback cannot resolve a defau
   assertEvent(events, "selection.execution_blocked_missing_default", "warn");
 });
 
+test("execution summary renderer stays compact and never uses the display table", async (t) => {
+  const tempRoot = await createTempDir("codexes-execution-summary");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { accounts, cacheFilePath } = await createExperimentalAccounts(tempRoot);
+  const { logger } = createTestLogger();
+
+  const summary = await resolveSelectionSummary({
+    experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
+    fetchImpl: async (_url, init) => {
+      const accountId = extractAccountIdHeader(init);
+      return jsonResponse(
+        accountId === "acct-1"
+          ? {
+              rate_limit: {
+                allowed: true,
+                plan: "free",
+                primary_window: { used_percent: 98 },
+                secondary_window: { used_percent: 92 },
+              },
+            }
+          : {
+              rate_limit: {
+                allowed: true,
+                plan: "pro",
+                primary_window: { used_percent: 95 },
+                secondary_window: { used_percent: 93 },
+              },
+            },
+      );
+    },
+    logger,
+    mode: "execution",
+    registry: createRegistry(accounts, "acct-1"),
+    selectionCacheFilePath: cacheFilePath,
+    strategy: "remaining-limit",
+  });
+
+  const rendered = formatSelectionSummary({
+    capabilities: {
+      stdoutIsTTY: false,
+      useColor: false,
+    },
+    logger,
+    renderVariant: "execution-summary",
+    summary,
+  });
+
+  assert.match(rendered, /personal \(acct-2\) \[selected, rank #1\] status=usable 5h=5% weekly=7% plan=pro source=fresh detail=rankable/);
+  assert.match(rendered, /Selected account: personal \(acct-2\) via remaining-limit\./);
+  assert.doesNotMatch(rendered, /\| Label +\| Account ID +\|/);
+});
+
 test("runRootCommand launches the experimentally selected account", async (t) => {
   const tempRoot = await createTempDir("codexes-root-experimental");
   t.after(async () => removeTempDir(tempRoot));
@@ -424,6 +479,7 @@ test("runRootCommand launches the experimentally selected account", async (t) =>
   );
   assert.match(stdoutChunks.join(""), /5h=4% .*weekly=7% .*plan=pro .*source=fresh/);
   assert.match(stdoutChunks.join(""), /source=fresh/);
+  assert.doesNotMatch(stdoutChunks.join(""), /\| Label +\| Account ID +\|/);
 
   const syncedAuth = JSON.parse(
     await readFile(path.join(personal.authDirectory, "state", "auth.json"), "utf8"),
@@ -432,6 +488,10 @@ test("runRootCommand launches the experimentally selected account", async (t) =>
   assertEvent(events, "root.selection.strategy_active", "info");
   assertEvent(events, "root.selection.experimental_enabled", "info");
   assertEvent(events, "root.selection.experimental_selected", "info");
+  assert.equal(
+    findLoggedEvent(events, "root.summary_rendered", "info")?.details?.renderVariant,
+    "execution-summary",
+  );
 });
 
 function createRegistry(
@@ -626,6 +686,22 @@ function extractAccountIdHeader(init: RequestInit | undefined): string | null {
 
   const headers = new Headers(init.headers);
   return headers.get("OpenAI-Account-ID");
+}
+
+function findLoggedEvent(
+  events: Array<{
+    details: Record<string, unknown> | undefined;
+    event: string;
+    level: "debug" | "info" | "warn" | "error";
+  }>,
+  event: string,
+  level?: "debug" | "info" | "warn" | "error",
+): {
+  details: Record<string, unknown> | undefined;
+  event: string;
+  level: "debug" | "info" | "warn" | "error";
+} | undefined {
+  return events.find((entry) => entry.event === event && (!level || entry.level === level));
 }
 
 function jsonResponse(value: unknown): Response {

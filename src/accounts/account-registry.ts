@@ -24,6 +24,7 @@ export interface AccountRegistry {
   addAccount(input: { label: string; authDirectory?: string }): Promise<AccountRecord>;
   getDefaultAccount(): Promise<AccountRecord | null>;
   listAccounts(): Promise<AccountRecord[]>;
+  renameAccount(accountId: string, label: string): Promise<AccountRecord>;
   removeAccount(accountId: string): Promise<AccountRecord>;
   selectAccount(accountId: string): Promise<AccountRecord>;
 }
@@ -96,6 +97,44 @@ export function createAccountRegistry(input: {
       });
 
       return [...document.accounts];
+    },
+    renameAccount(accountId, label) {
+      return withRegistryMutation(input, "registry.rename", async (document, now) => {
+        const record = document.accounts.find((account) => account.id === accountId);
+
+        if (!record) {
+          input.logger.warn("registry.rename_missing", { accountId });
+          throw new Error(`Account "${accountId}" was not found.`);
+        }
+
+        const normalizedLabel = normalizeLabel(label);
+        const duplicate = document.accounts.find(
+          (account) =>
+            account.id !== accountId &&
+            account.label.toLowerCase() === normalizedLabel.toLowerCase(),
+        );
+
+        if (duplicate) {
+          input.logger.warn("registry.rename_duplicate_label", {
+            accountId,
+            label: normalizedLabel,
+            existingAccountId: duplicate.id,
+          });
+          throw new Error(`An account named "${normalizedLabel}" already exists.`);
+        }
+
+        const previousLabel = record.label;
+        record.label = normalizedLabel;
+        record.updatedAt = now;
+
+        input.logger.info("registry.account_renamed", {
+          accountId,
+          previousLabel,
+          label: record.label,
+        });
+
+        return record;
+      });
     },
     removeAccount(accountId) {
       return withRegistryMutation(input, "registry.remove", async (document, now) => {
