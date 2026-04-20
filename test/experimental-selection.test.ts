@@ -647,6 +647,7 @@ function createRootCommandContext(input: {
       sharedCodexHome: input.sharedCodexHome,
       accountRoot: path.join(input.dataRoot, "accounts"),
       runtimeRoot: input.runtimeRoot,
+      executionRoot: path.join(input.runtimeRoot, "executions"),
       registryFile: input.registryFile,
       wrapperConfigFile: path.join(input.dataRoot, "codexes.json"),
       codexConfigFile: path.join(input.sharedCodexHome, "config.toml"),
@@ -669,6 +670,8 @@ function createRootCommandContext(input: {
       credentialStorePolicyReason: "file mode detected in Codex config",
       accountSelectionStrategy: "remaining-limit",
       accountSelectionStrategySource: "default",
+      runtimeModel: "isolated-execution",
+      runtimeModelSource: "default",
       experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
     },
     codexBinary: {

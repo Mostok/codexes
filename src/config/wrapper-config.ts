@@ -8,6 +8,7 @@ export type AccountSelectionStrategy =
   | "single-account"
   | "remaining-limit"
   | "remaining-limit-experimental";
+export type RuntimeModel = "isolated-execution" | "legacy-shared";
 
 export interface WrapperConfig {
   configFilePath: string;
@@ -15,6 +16,8 @@ export interface WrapperConfig {
   selectionCacheFilePath: string;
   credentialStoreMode: CredentialStoreMode;
   credentialStorePolicyReason: string;
+  runtimeModel: RuntimeModel;
+  runtimeModelSource: "default" | "env-override" | "invalid-env-fallback";
   accountSelectionStrategy: AccountSelectionStrategy;
   accountSelectionStrategySource: "default" | "env-override" | "invalid-env-fallback";
   experimentalSelection: ExperimentalSelectionConfig;
@@ -43,6 +46,7 @@ export async function resolveWrapperConfig(input: {
   );
 
   const selectionStrategy = resolveAccountSelectionStrategy(input.env, input.logger);
+  const runtimeModel = resolveRuntimeModel(input.env, input.logger);
   const resolved = {
     configFilePath: input.paths.wrapperConfigFile,
     codexConfigFilePath: input.paths.codexConfigFile,
@@ -52,6 +56,8 @@ export async function resolveWrapperConfig(input: {
       credentialStoreMode === "file"
         ? "file mode detected in Codex config"
         : "codexes currently supports only file-backed auth storage",
+    runtimeModel: runtimeModel.model,
+    runtimeModelSource: runtimeModel.source,
     accountSelectionStrategy: selectionStrategy.strategy,
     accountSelectionStrategySource: selectionStrategy.source,
     experimentalSelection: resolveExperimentalSelectionConfig({
@@ -66,12 +72,68 @@ export async function resolveWrapperConfig(input: {
     codexConfigFilePath: resolved.codexConfigFilePath,
     selectionCacheFilePath: resolved.selectionCacheFilePath,
     credentialStoreMode: resolved.credentialStoreMode,
+    runtimeModel: resolved.runtimeModel,
+    runtimeModelSource: resolved.runtimeModelSource,
     accountSelectionStrategy: resolved.accountSelectionStrategy,
     accountSelectionStrategySource: resolved.accountSelectionStrategySource,
     experimentalSelection: resolved.experimentalSelection,
   });
 
   return resolved;
+}
+
+function resolveRuntimeModel(
+  env: NodeJS.ProcessEnv,
+  logger: Logger,
+): {
+  model: RuntimeModel;
+  source: "default" | "env-override" | "invalid-env-fallback";
+} {
+  const rawOverride = env.CODEXES_RUNTIME_MODEL?.trim().toLowerCase();
+
+  switch (rawOverride) {
+    case undefined:
+    case "":
+      logger.info("wrapper_config.runtime_model_default_applied", {
+        runtimeModel: "isolated-execution",
+      });
+      return {
+        model: "isolated-execution",
+        source: "default",
+      };
+    case "isolated":
+    case "isolated-execution":
+      logger.info("wrapper_config.runtime_model_override_applied", {
+        envKey: "CODEXES_RUNTIME_MODEL",
+        requestedModel: rawOverride,
+        runtimeModel: "isolated-execution",
+      });
+      return {
+        model: "isolated-execution",
+        source: "env-override",
+      };
+    case "legacy":
+    case "legacy-shared":
+      logger.warn("wrapper_config.runtime_model_legacy_enabled", {
+        envKey: "CODEXES_RUNTIME_MODEL",
+        requestedModel: rawOverride,
+        runtimeModel: "legacy-shared",
+      });
+      return {
+        model: "legacy-shared",
+        source: "env-override",
+      };
+    default:
+      logger.warn("wrapper_config.runtime_model_invalid_override", {
+        envKey: "CODEXES_RUNTIME_MODEL",
+        rawValue: rawOverride,
+        fallbackModel: "isolated-execution",
+      });
+      return {
+        model: "isolated-execution",
+        source: "invalid-env-fallback",
+      };
+  }
 }
 
 function resolveExperimentalSelectionConfig(input: {

@@ -11,12 +11,23 @@ import { runAccountRenameCommand } from "../account-rename/run-account-rename-co
 import { runAccountSetPaidAtCommand } from "../account-set-paid-at/run-account-set-paid-at-command.js";
 import { runAccountRemoveCommand } from "../account-remove/run-account-remove-command.js";
 import { runAccountUseCommand } from "../account-use/run-account-use-command.js";
-import { acquireRuntimeLock } from "../../runtime/lock/runtime-lock.js";
+import {
+  acquireAccountSyncLock,
+  acquireRuntimeLock,
+  acquireSharedSyncLock,
+} from "../../runtime/lock/runtime-lock.js";
 import {
   activateAccountIntoSharedRuntime,
   restoreSharedRuntimeFromBackup,
+  syncExecutionWorkspaceBackToAccount,
+  syncExecutionWorkspaceBackToSharedHome,
   syncSharedRuntimeBackToAccount,
 } from "../../runtime/activate-account/activate-account.js";
+import {
+  cleanupExecutionWorkspace,
+  prepareExecutionWorkspace,
+  sanitizeRetainedExecutionWorkspace,
+} from "../../runtime/login-workspace.js";
 import { spawnCodexCommand } from "../../process/spawn-codex-command.js";
 import { formatSelectionSummary } from "../../selection/format-selection-summary.js";
 import { resolveSelectionSummary } from "../../selection/selection-summary.js";
@@ -33,6 +44,7 @@ export async function runRootCommand(context: AppContext): Promise<number> {
     sharedCodexHome: context.paths.sharedCodexHome,
     accountRoot: context.paths.accountRoot,
     runtimeRoot: context.paths.runtimeRoot,
+    executionRoot: context.paths.executionRoot,
     registryFile: context.paths.registryFile,
     wrapperConfigFile: context.paths.wrapperConfigFile,
     selectionCacheFile: context.paths.selectionCacheFile,
@@ -42,6 +54,8 @@ export async function runRootCommand(context: AppContext): Promise<number> {
     credentialStoreMode: context.wrapperConfig.credentialStoreMode,
     accountSelectionStrategy: context.wrapperConfig.accountSelectionStrategy,
     accountSelectionStrategySource: context.wrapperConfig.accountSelectionStrategySource,
+    runtimeModel: context.wrapperConfig.runtimeModel,
+    runtimeModelSource: context.wrapperConfig.runtimeModelSource,
     experimentalSelection: context.wrapperConfig.experimentalSelection,
     codexBinaryPath: context.codexBinary.path,
     recursionGuardSource: context.executablePath,
@@ -52,6 +66,7 @@ export async function runRootCommand(context: AppContext): Promise<number> {
     credentialStoreMode: context.wrapperConfig.credentialStoreMode,
     logger,
     runtimeRoot: context.paths.runtimeRoot,
+    executionRoot: context.paths.executionRoot,
     sharedCodexHome: context.paths.sharedCodexHome,
   });
   const runtimeSummary = summarizeRuntimeContract(runtimeContract);
@@ -202,40 +217,326 @@ export async function runRootCommand(context: AppContext): Promise<number> {
       selectedAccountId: activeAccount.id,
     });
   }
-  const lock = await acquireRuntimeLock({
+  if (context.wrapperConfig.runtimeModel === "legacy-shared") {
+    logger.warn("runtime_model.legacy_fallback", {
+      accountId: activeAccount.id,
+      sharedCodexHome: context.paths.sharedCodexHome,
+      reason: "CODEXES_RUNTIME_MODEL selected legacy shared runtime",
+    });
+    return runLegacySharedRuntimeFlow({
+      activeAccount,
+      argv: context.argv,
+      codexBinaryPath: context.codexBinary.path,
+      logger,
+      runtimeContract,
+      runtimeRoot: context.paths.runtimeRoot,
+      sharedCodexHome: context.paths.sharedCodexHome,
+    });
+  }
+
+  logger.info("runtime_model.isolated_execution.start", {
+    accountId: activeAccount.id,
+    label: activeAccount.label,
+    runtimeRoot: context.paths.runtimeRoot,
+    executionRoot: context.paths.executionRoot,
+  });
+
+  logger.info("runtime_model.isolated_execution.prepare.start", {
+    accountId: activeAccount.id,
+    label: activeAccount.label,
+    phase: "prepare",
+  });
+  logger.info("runtime_model.isolated_execution.account_lock_acquiring", {
+    accountId: activeAccount.id,
+    label: activeAccount.label,
+    purpose: "prepare-workspace-account-read",
+  });
+  const prepareAccountLock = await acquireAccountSyncLock({
+    accountId: activeAccount.id,
     logger,
     runtimeRoot: context.paths.runtimeRoot,
   });
 
+  let workspace: Awaited<ReturnType<typeof prepareExecutionWorkspace>>;
+  try {
+    logger.info("runtime_model.isolated_execution.account_lock_acquired", {
+      accountId: activeAccount.id,
+      label: activeAccount.label,
+      purpose: "prepare-workspace-account-read",
+    });
+
+    logger.info("runtime_model.isolated_execution.shared_lock_acquiring", {
+      accountId: activeAccount.id,
+      label: activeAccount.label,
+      purpose: "prepare-workspace-shared-read",
+    });
+    const prepareSharedSyncLock = await acquireSharedSyncLock({
+      logger,
+      runtimeRoot: context.paths.runtimeRoot,
+    });
+
+    try {
+      logger.info("runtime_model.isolated_execution.shared_lock_acquired", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        purpose: "prepare-workspace-shared-read",
+      });
+      workspace = await prepareExecutionWorkspace({
+        account: activeAccount,
+        logger,
+        runtimeContract,
+        sharedCodexHome: context.paths.sharedCodexHome,
+      });
+    } catch (error) {
+      logger.error("runtime_model.isolated_execution.prepare_workspace_failed", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        lockPurpose: "prepare-workspace-shared-read",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    } finally {
+      logger.info("runtime_model.isolated_execution.shared_lock_releasing", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        purpose: "prepare-workspace-shared-read",
+      });
+      await prepareSharedSyncLock.release();
+    }
+  } finally {
+    logger.info("runtime_model.isolated_execution.account_lock_releasing", {
+      accountId: activeAccount.id,
+      label: activeAccount.label,
+      purpose: "prepare-workspace-account-read",
+    });
+    await prepareAccountLock.release();
+  }
+
+  logger.info("runtime_model.isolated_execution.prepare.complete", {
+    accountId: activeAccount.id,
+    label: activeAccount.label,
+    sessionId: workspace.sessionId,
+    phase: "prepare",
+  });
+
+  let workspaceCanBeCleanedUp = false;
+
+  try {
+    logger.info("runtime_model.isolated_execution.child_run.start", {
+      accountId: activeAccount.id,
+      label: activeAccount.label,
+      sessionId: workspace.sessionId,
+      codexHome: workspace.codexHome,
+      phase: "child_run",
+    });
+    const exitCode = await spawnCodexCommand({
+      argv: context.argv,
+      codexBinaryPath: context.codexBinary.path,
+      codexHome: workspace.codexHome,
+      logger,
+    });
+    logger.info("runtime_model.isolated_execution.child_run.complete", {
+      accountId: activeAccount.id,
+      label: activeAccount.label,
+      sessionId: workspace.sessionId,
+      exitCode,
+      phase: "child_run",
+    });
+
+    if (exitCode !== 0) {
+      logger.warn("runtime_model.isolated_execution.sync_back_skipped", {
+        accountId: activeAccount.id,
+        sessionId: workspace.sessionId,
+        exitCode,
+        reason: "child process exited unsuccessfully",
+      });
+      workspaceCanBeCleanedUp = true;
+      return exitCode;
+    }
+
+    logger.info("runtime_model.isolated_execution.account_lock_acquiring", {
+      accountId: activeAccount.id,
+      label: activeAccount.label,
+      sessionId: workspace.sessionId,
+      purpose: "account-sync-back",
+    });
+    const syncAccountLock = await acquireAccountSyncLock({
+      accountId: activeAccount.id,
+      logger,
+      runtimeRoot: context.paths.runtimeRoot,
+    });
+
+    try {
+      logger.info("runtime_model.isolated_execution.account_lock_acquired", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        sessionId: workspace.sessionId,
+        purpose: "account-sync-back",
+      });
+      logger.info("runtime_model.isolated_execution.shared_sync_back.start", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        sessionId: workspace.sessionId,
+        purpose: "shared-sync-back",
+        phase: "shared_sync_back",
+      });
+      const sharedSyncLock = await acquireSharedSyncLock({
+        logger,
+        runtimeRoot: context.paths.runtimeRoot,
+      });
+
+      try {
+        await syncExecutionWorkspaceBackToSharedHome({
+          logger,
+          runtimeContract,
+          sharedCodexHome: context.paths.sharedCodexHome,
+          workspace,
+        });
+      } finally {
+        await sharedSyncLock.release();
+      }
+      logger.info("runtime_model.isolated_execution.shared_sync_back.complete", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        sessionId: workspace.sessionId,
+        purpose: "shared-sync-back",
+        phase: "shared_sync_back",
+      });
+      logger.info("runtime_model.isolated_execution.account_sync_back.start", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        sessionId: workspace.sessionId,
+        purpose: "account-sync-back",
+        phase: "account_sync_back",
+      });
+      await syncExecutionWorkspaceBackToAccount({
+        account: activeAccount,
+        logger,
+        runtimeContract,
+        workspace,
+      });
+      logger.info("runtime_model.isolated_execution.account_sync_back.complete", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        sessionId: workspace.sessionId,
+        purpose: "account-sync-back",
+        phase: "account_sync_back",
+      });
+    } finally {
+      logger.info("runtime_model.isolated_execution.account_lock_releasing", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        sessionId: workspace.sessionId,
+        purpose: "account-sync-back",
+      });
+      await syncAccountLock.release();
+    }
+
+    workspaceCanBeCleanedUp = true;
+
+    logger.info("runtime_model.isolated_execution.complete", {
+      accountId: activeAccount.id,
+      sessionId: workspace.sessionId,
+      exitCode,
+    });
+
+    return exitCode;
+  } finally {
+    logger.info("runtime_model.isolated_execution.cleanup.start", {
+      accountId: activeAccount.id,
+      label: activeAccount.label,
+      sessionId: workspace.sessionId,
+      workspaceRoot: workspace.workspaceRoot,
+      phase: "cleanup",
+    });
+    if (workspaceCanBeCleanedUp) {
+      await cleanupExecutionWorkspace({
+        logger,
+        workspace,
+      });
+    } else {
+      await sanitizeRetainedExecutionWorkspace({
+        logger,
+        runtimeContract,
+        workspace,
+      });
+      logger.warn("runtime_model.isolated_execution.workspace_retained", {
+        accountId: activeAccount.id,
+        sessionId: workspace.sessionId,
+        workspaceRoot: workspace.workspaceRoot,
+        reason: "sync-back did not complete successfully",
+      });
+    }
+    logger.info("runtime_model.isolated_execution.cleanup.complete", {
+      accountId: activeAccount.id,
+      label: activeAccount.label,
+      sessionId: workspace.sessionId,
+      workspaceRoot: workspace.workspaceRoot,
+      cleanedUp: workspaceCanBeCleanedUp,
+      phase: "cleanup",
+    });
+  }
+}
+
+async function runLegacySharedRuntimeFlow(input: {
+  activeAccount: NonNullable<Awaited<ReturnType<typeof resolveSelectionSummary>>["selectedAccount"]>;
+  argv: string[];
+  codexBinaryPath: string;
+  logger: ReturnType<typeof createLogger>;
+  runtimeContract: ReturnType<typeof createRuntimeContract>;
+  runtimeRoot: string;
+  sharedCodexHome: string;
+}): Promise<number> {
+  const lock = await acquireRuntimeLock({
+    logger: input.logger,
+    runtimeRoot: input.runtimeRoot,
+  });
+
   try {
     const activation = await activateAccountIntoSharedRuntime({
-      account: activeAccount,
-      logger,
-      runtimeContract,
-      sharedCodexHome: context.paths.sharedCodexHome,
+      account: input.activeAccount,
+      logger: input.logger,
+      runtimeContract: input.runtimeContract,
+      sharedCodexHome: input.sharedCodexHome,
     });
 
     try {
       const exitCode = await spawnCodexCommand({
-        argv: context.argv,
-        codexBinaryPath: context.codexBinary.path,
-        codexHome: context.paths.sharedCodexHome,
-        logger,
+        argv: input.argv,
+        codexBinaryPath: input.codexBinaryPath,
+        codexHome: input.sharedCodexHome,
+        logger: input.logger,
       });
 
+      if (exitCode !== 0) {
+        input.logger.warn("runtime_model.legacy_shared.sync_back_skipped", {
+          accountId: input.activeAccount.id,
+          exitCode,
+          reason: "child process exited unsuccessfully",
+        });
+        await restoreSharedRuntimeFromBackup({
+          account: input.activeAccount,
+          backupRoot: activation.backupRoot,
+          logger: input.logger,
+          runtimeContract: input.runtimeContract,
+          sharedCodexHome: input.sharedCodexHome,
+        });
+        return exitCode;
+      }
+
       await syncSharedRuntimeBackToAccount({
-        logger,
+        logger: input.logger,
         session: activation,
       });
 
       return exitCode;
     } catch (error) {
       await restoreSharedRuntimeFromBackup({
-        account: activeAccount,
+        account: input.activeAccount,
         backupRoot: activation.backupRoot,
-        logger,
-        runtimeContract,
-        sharedCodexHome: context.paths.sharedCodexHome,
+        logger: input.logger,
+        runtimeContract: input.runtimeContract,
+        sharedCodexHome: input.sharedCodexHome,
       });
       throw error;
     }

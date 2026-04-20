@@ -1,11 +1,23 @@
-import { copyFile, cp, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import type { AccountRecord } from "../accounts/account-registry.js";
 import type { Logger } from "../logging/logger.js";
 import type { RuntimeContract, RuntimeFileRule } from "./runtime-contract.js";
+import { assertPathInsideRoot, resolveAccountRuntimePaths } from "./runtime-contract.js";
 
 export interface LoginWorkspace {
   workspaceRoot: string;
   codexHome: string;
+}
+
+export interface ExecutionWorkspace {
+  accountId: string;
+  accountStateRoot: string;
+  codexHome: string;
+  executionRoot: string;
+  sessionId: string;
+  workspaceRoot: string;
 }
 
 export async function prepareLoginWorkspace(input: {
@@ -18,33 +30,231 @@ export async function prepareLoginWorkspace(input: {
   const workspaceRoot = await mkdtemp(path.join(workspaceParent, "account-add-"));
   const codexHome = path.join(workspaceRoot, "codex-home");
 
-  await mkdir(codexHome, { recursive: true });
-  input.logger.info("login_workspace.created", {
+  await bootstrapCodexHome({
+    accountId: null,
+    accountStateRoot: null,
+    codexHome,
+    logger: input.logger,
+    runtimeContract: null,
+    sharedCodexHome: input.sharedCodexHome,
+    workspaceKind: "account-add",
+    workspaceRoot,
+  });
+  await mkdir(path.join(codexHome, "sessions"), { recursive: true });
+
+  return { workspaceRoot, codexHome };
+}
+
+export async function prepareExecutionWorkspace(input: {
+  account: AccountRecord;
+  logger: Logger;
+  runtimeContract: RuntimeContract;
+  sharedCodexHome: string;
+}): Promise<ExecutionWorkspace> {
+  const sessionId = createExecutionSessionId();
+  const runtimePaths = resolveAccountRuntimePaths(input.runtimeContract, input.account.id);
+  const accountStateRoot = runtimePaths.accountStateDirectory;
+  const workspaceRoot = path.join(runtimePaths.runtimeExecutionDirectory, sessionId);
+  const codexHome = path.join(workspaceRoot, "codex-home");
+  const authSourcePath = path.join(accountStateRoot, "auth.json");
+
+  assertPathInsideRoot(workspaceRoot, input.runtimeContract.executionRoot, "executionWorkspace");
+  assertPathInsideRoot(codexHome, workspaceRoot, "executionCodexHome");
+  assertPathInsideRoot(accountStateRoot, input.runtimeContract.perAccountRoot, "accountStateRoot");
+
+  input.logger.info("execution_workspace.prepare.start", {
+    accountId: input.account.id,
+    label: input.account.label,
+    sessionId,
     workspaceRoot,
     codexHome,
+    accountStateRoot,
+    sharedCodexHome: input.sharedCodexHome,
+  });
+
+  if (!(await pathExists(authSourcePath))) {
+    input.logger.error("execution_workspace.missing_auth", {
+      accountId: input.account.id,
+      authSourcePath,
+    });
+    throw new Error(
+      `Account "${input.account.label}" has no stored auth.json; add the account again.`,
+    );
+  }
+
+  await bootstrapCodexHome({
+    accountId: input.account.id,
+    accountStateRoot,
+    codexHome,
+    logger: input.logger,
+    runtimeContract: input.runtimeContract,
+    sharedCodexHome: input.sharedCodexHome,
+    workspaceKind: "execution",
+    workspaceRoot,
+  });
+
+  input.logger.info("execution_workspace.prepare.complete", {
+    accountId: input.account.id,
+    sessionId,
+    workspaceRoot,
+    codexHome,
+  });
+
+  return {
+    accountId: input.account.id,
+    accountStateRoot,
+    codexHome,
+    executionRoot: input.runtimeContract.executionRoot,
+    sessionId,
+    workspaceRoot,
+  };
+}
+
+export async function cleanupExecutionWorkspace(input: {
+  logger: Logger;
+  workspace: ExecutionWorkspace;
+}): Promise<void> {
+  input.logger.debug("execution_workspace.cleanup.start", {
+    accountId: input.workspace.accountId,
+    sessionId: input.workspace.sessionId,
+    workspaceRoot: input.workspace.workspaceRoot,
+  });
+
+  assertPathInsideRoot(
+    input.workspace.workspaceRoot,
+    input.workspace.executionRoot,
+    "executionWorkspaceCleanup",
+  );
+
+  await rm(input.workspace.workspaceRoot, { force: true, recursive: true }).catch(
+    (error: unknown) => {
+      input.logger.warn("execution_workspace.cleanup.failed", {
+        accountId: input.workspace.accountId,
+        sessionId: input.workspace.sessionId,
+        workspaceRoot: input.workspace.workspaceRoot,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    },
+  );
+
+  input.logger.debug("execution_workspace.cleanup.complete", {
+    accountId: input.workspace.accountId,
+    sessionId: input.workspace.sessionId,
+    workspaceRoot: input.workspace.workspaceRoot,
+  });
+}
+
+export async function sanitizeRetainedExecutionWorkspace(input: {
+  logger: Logger;
+  runtimeContract: RuntimeContract;
+  workspace: ExecutionWorkspace;
+}): Promise<void> {
+  const sensitiveRules = input.runtimeContract.fileRules.filter(
+    (rule) => rule.classification === "account",
+  );
+
+  input.logger.warn("execution_workspace.sanitize.start", {
+    accountId: input.workspace.accountId,
+    sessionId: input.workspace.sessionId,
+    workspaceRoot: input.workspace.workspaceRoot,
+    codexHome: input.workspace.codexHome,
+    sensitivePatterns: sensitiveRules.map((rule) => rule.pathPattern),
+  });
+
+  for (const rule of sensitiveRules) {
+    const targetPath = resolveSanitizedRuleTarget(input.workspace.codexHome, rule);
+    if (!targetPath) {
+      input.logger.warn("execution_workspace.sanitize.pattern_unsupported", {
+        accountId: input.workspace.accountId,
+        sessionId: input.workspace.sessionId,
+        pathPattern: rule.pathPattern,
+        reason: "unsupported-account-pattern",
+      });
+      continue;
+    }
+
+    assertPathInsideRoot(targetPath, input.workspace.codexHome, "executionWorkspaceSanitize");
+    input.logger.debug("execution_workspace.sanitize.removing", {
+      accountId: input.workspace.accountId,
+      sessionId: input.workspace.sessionId,
+      pathPattern: rule.pathPattern,
+      targetPath,
+    });
+
+    await rm(targetPath, { force: true, recursive: true }).catch((error: unknown) => {
+      input.logger.warn("execution_workspace.sanitize.failed", {
+        accountId: input.workspace.accountId,
+        sessionId: input.workspace.sessionId,
+        pathPattern: rule.pathPattern,
+        targetPath,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
+  input.logger.warn("execution_workspace.sanitize.complete", {
+    accountId: input.workspace.accountId,
+    sessionId: input.workspace.sessionId,
+    workspaceRoot: input.workspace.workspaceRoot,
+    codexHome: input.workspace.codexHome,
+  });
+}
+
+async function bootstrapCodexHome(input: {
+  accountId: string | null;
+  accountStateRoot: string | null;
+  codexHome: string;
+  logger: Logger;
+  runtimeContract: RuntimeContract | null;
+  sharedCodexHome: string;
+  workspaceKind: "account-add" | "execution";
+  workspaceRoot: string;
+}): Promise<void> {
+  await mkdir(input.codexHome, { recursive: true });
+  input.logger.info("workspace_bootstrap.start", {
+    accountId: input.accountId,
+    workspaceKind: input.workspaceKind,
+    workspaceRoot: input.workspaceRoot,
+    codexHome: input.codexHome,
     sharedCodexHome: input.sharedCodexHome,
   });
 
   await ensurePinnedFileConfig({
-    codexHome,
+    codexHome: input.codexHome,
     logger: input.logger,
     sharedCodexHome: input.sharedCodexHome,
   });
   await copySharedArtifactIfPresent({
     artifactName: "mcp.json",
-    codexHome,
+    codexHome: input.codexHome,
     logger: input.logger,
     sharedCodexHome: input.sharedCodexHome,
   });
   await copySharedDirectoryIfPresent({
     artifactName: "trust",
-    codexHome,
+    codexHome: input.codexHome,
     logger: input.logger,
     sharedCodexHome: input.sharedCodexHome,
   });
-  await mkdir(path.join(codexHome, "sessions"), { recursive: true });
 
-  return { workspaceRoot, codexHome };
+  if (input.runtimeContract && input.accountStateRoot && input.accountId) {
+    await copyAccountScopedAuthArtifacts({
+      accountId: input.accountId,
+      destinationRoot: input.codexHome,
+      logger: input.logger,
+      runtimeContract: input.runtimeContract,
+      sourceCodexHome: input.accountStateRoot,
+    });
+  }
+
+  await mkdir(path.join(input.codexHome, "sessions"), { recursive: true });
+
+  input.logger.info("workspace_bootstrap.complete", {
+    accountId: input.accountId,
+    workspaceKind: input.workspaceKind,
+    workspaceRoot: input.workspaceRoot,
+    codexHome: input.codexHome,
+  });
 }
 
 export async function copyAccountScopedAuthArtifacts(input: {
@@ -202,6 +412,18 @@ async function copyRuleArtifacts(input: {
   });
 }
 
+function resolveSanitizedRuleTarget(codexHome: string, rule: RuntimeFileRule): string | null {
+  if (rule.pathPattern.endsWith("/**")) {
+    return path.join(codexHome, rule.pathPattern.slice(0, -3));
+  }
+
+  if (rule.pathPattern.includes("*")) {
+    return null;
+  }
+
+  return path.join(codexHome, rule.pathPattern);
+}
+
 function pinFileCredentialStore(rawConfig: string): string {
   if (/^\s*cli_auth_credentials_store\s*=\s*"file"/m.test(rawConfig)) {
     return rawConfig;
@@ -238,4 +460,8 @@ async function pathExists(targetPath: string): Promise<boolean> {
 
     throw error;
   }
+}
+
+function createExecutionSessionId(): string {
+  return `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID()}`;
 }

@@ -115,7 +115,11 @@ test("CLI passes unknown args and piped stdin through a single configured accoun
   }>(childOutputFile);
   assert.deepEqual(childOutput.argv, ["--model", "gpt-5", "chat", "--json"]);
   assert.equal(childOutput.stdin, "stdin-payload");
-  assert.equal(childOutput.codexHome, sharedCodexHome);
+  assert.notEqual(childOutput.codexHome, sharedCodexHome);
+  assert.match(
+    path.relative(path.join(dataRoot, "runtime", "executions"), childOutput.codexHome),
+    /^.+[\\/]codex-home$/,
+  );
 
   const syncedAuth = JSON.parse(
     await readFile(path.join(runtimePaths.accountStateDirectory, "auth.json"), "utf8"),

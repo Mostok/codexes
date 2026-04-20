@@ -52,6 +52,7 @@ export async function runAccountSetPaidAtCommand(
   const runtimeContract = createRuntimeContract({
     accountRoot: context.paths.accountRoot,
     credentialStoreMode: context.wrapperConfig.credentialStoreMode,
+    executionRoot: context.paths.executionRoot,
     logger,
     runtimeRoot: context.paths.runtimeRoot,
     sharedCodexHome: context.paths.sharedCodexHome,

@@ -19,6 +19,7 @@ export interface RuntimeContract {
   credentialStoreMode: CredentialStoreMode;
   sharedCodexHome: string;
   runtimeRoot: string;
+  executionRoot: string;
   perAccountRoot: string;
   supported: boolean;
   fileRules: RuntimeFileRule[];
@@ -32,6 +33,7 @@ export interface RuntimeContract {
 export function createRuntimeContract(input: {
   accountRoot: string;
   credentialStoreMode: CredentialStoreMode;
+  executionRoot?: string;
   logger: Logger;
   runtimeRoot: string;
   sharedCodexHome: string;
@@ -40,12 +42,23 @@ export function createRuntimeContract(input: {
     credentialStoreMode: input.credentialStoreMode,
     sharedCodexHome: input.sharedCodexHome,
     runtimeRoot: input.runtimeRoot,
+    executionRoot: input.executionRoot ?? path.join(input.runtimeRoot, "executions"),
     perAccountRoot: input.accountRoot,
     supported: input.credentialStoreMode === "file",
     fileRules: [
       createRule("config.toml", "shared", "never", "Shared CLI behavior and MCP config should remain common."),
-      createRule("mcp.json", "shared", "never", "MCP topology is shared across accounts."),
-      createRule("trust/**", "shared", "never", "Trust metadata should not be overwritten per account."),
+      createRule(
+        "mcp.json",
+        "shared",
+        "if-changed",
+        "MCP topology is shared across accounts and should persist across isolated runs.",
+      ),
+      createRule(
+        "trust/**",
+        "shared",
+        "if-changed",
+        "Trust metadata is shared across accounts and should persist across isolated runs.",
+      ),
       createRule(
         "auth.json",
         "account",
@@ -90,6 +103,7 @@ export function createRuntimeContract(input: {
   input.logger.info("runtime.contract_created", {
     sharedCodexHome: contract.sharedCodexHome,
     runtimeRoot: contract.runtimeRoot,
+    executionRoot: contract.executionRoot,
     perAccountRoot: contract.perAccountRoot,
     credentialStoreMode: contract.credentialStoreMode,
     supported: contract.supported,
@@ -104,15 +118,52 @@ export function createRuntimeContract(input: {
 }
 
 export function resolveAccountRuntimePaths(contract: RuntimeContract, accountId: string) {
+  assertSafeAccountId(accountId);
   const accountDirectory = path.join(contract.perAccountRoot, accountId);
+  const accountSyncLockDirectory = path.join(
+    contract.runtimeRoot,
+    "locks",
+    "account",
+    accountId,
+    "sync.lock",
+  );
+  const runtimeBackupDirectory = path.join(contract.runtimeRoot, "backups", accountId);
+  const runtimeExecutionDirectory = path.join(contract.executionRoot, accountId);
+  const runtimeTempDirectory = path.join(contract.runtimeRoot, "tmp", accountId);
+
+  assertPathInsideRoot(accountDirectory, contract.perAccountRoot, "accountDirectory");
+  assertPathInsideRoot(accountSyncLockDirectory, contract.runtimeRoot, "accountSyncLockDirectory");
+  assertPathInsideRoot(runtimeBackupDirectory, contract.runtimeRoot, "runtimeBackupDirectory");
+  assertPathInsideRoot(runtimeExecutionDirectory, contract.executionRoot, "runtimeExecutionDirectory");
+  assertPathInsideRoot(runtimeTempDirectory, contract.runtimeRoot, "runtimeTempDirectory");
 
   return {
     accountDirectory,
     accountStateDirectory: path.join(accountDirectory, "state"),
     accountMetadataFile: path.join(accountDirectory, "account.json"),
-    runtimeBackupDirectory: path.join(contract.runtimeRoot, "backups", accountId),
-    runtimeTempDirectory: path.join(contract.runtimeRoot, "tmp", accountId),
+    accountSyncLockDirectory,
+    runtimeBackupDirectory,
+    runtimeExecutionDirectory,
+    runtimeTempDirectory,
   };
+}
+
+export function assertSafeAccountId(accountId: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(accountId) || accountId === "." || accountId === "..") {
+    throw new Error(`Invalid account id "${accountId}".`);
+  }
+}
+
+export function assertPathInsideRoot(targetPath: string, rootPath: string, label: string): void {
+  const resolvedTarget = path.resolve(targetPath);
+  const resolvedRoot = path.resolve(rootPath);
+  const relative = path.relative(resolvedRoot, resolvedTarget);
+
+  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+    return;
+  }
+
+  throw new Error(`${label} resolved outside its root: ${targetPath}`);
 }
 
 export function summarizeRuntimeContract(contract: RuntimeContract) {
@@ -121,6 +172,7 @@ export function summarizeRuntimeContract(contract: RuntimeContract) {
     credentialStoreMode: contract.credentialStoreMode,
     sharedCodexHome: contract.sharedCodexHome,
     runtimeRoot: contract.runtimeRoot,
+    executionRoot: contract.executionRoot,
     perAccountRoot: contract.perAccountRoot,
     classifications: contract.fileRules.reduce<Record<RuntimeFileClass, number>>(
       (accumulator, rule) => {

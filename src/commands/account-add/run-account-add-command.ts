@@ -111,6 +111,7 @@ export async function runAccountAddCommand(
     credentialStoreMode: context.wrapperConfig.credentialStoreMode,
     logger,
     runtimeRoot: context.paths.runtimeRoot,
+    executionRoot: context.paths.executionRoot,
     sharedCodexHome: context.paths.sharedCodexHome,
   });
   const workspace = await prepareLoginWorkspace({

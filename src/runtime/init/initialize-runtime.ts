@@ -50,6 +50,8 @@ export async function initializeRuntimeEnvironment(input: {
     input.paths.accountRoot,
     input.paths.runtimeRoot,
     path.join(input.paths.runtimeRoot, "backups"),
+    path.join(input.paths.runtimeRoot, "locks", "account"),
+    input.paths.executionRoot,
     path.join(input.paths.runtimeRoot, "tmp"),
     path.dirname(input.paths.registryFile),
   ]) {

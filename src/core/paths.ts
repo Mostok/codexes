@@ -6,6 +6,7 @@ export interface ResolvedPaths {
   dataRoot: string;
   sharedCodexHome: string;
   accountRoot: string;
+  executionRoot: string;
   runtimeRoot: string;
   registryFile: string;
   wrapperConfigFile: string;
@@ -25,6 +26,7 @@ export function resolvePaths(
     sharedCodexHome: env.CODEX_HOME ?? path.join(baseDataDir, "shared-home"),
     accountRoot: path.join(baseDataDir, "accounts"),
     runtimeRoot: path.join(baseDataDir, "runtime"),
+    executionRoot: path.join(baseDataDir, "runtime", "executions"),
     registryFile: path.join(baseDataDir, "registry.json"),
     wrapperConfigFile: path.join(baseDataDir, "codexes.json"),
     codexConfigFile: path.join(env.CODEX_HOME ?? path.join(baseDataDir, "shared-home"), "config.toml"),

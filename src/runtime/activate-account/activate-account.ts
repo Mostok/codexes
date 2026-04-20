@@ -5,6 +5,7 @@ import type { AccountRecord } from "../../accounts/account-registry.js";
 import type { Logger } from "../../logging/logger.js";
 import type { RuntimeContract, RuntimeFileRule } from "../runtime-contract.js";
 import { resolveAccountRuntimePaths } from "../runtime-contract.js";
+import type { ExecutionWorkspace } from "../login-workspace.js";
 
 export interface ActivatedAccountSession {
   account: AccountRecord;
@@ -118,6 +119,73 @@ export async function syncSharedRuntimeBackToAccount(input: {
 
   input.logger.info("account_sync.complete", {
     accountId: input.session.account.id,
+  });
+}
+
+export async function syncExecutionWorkspaceBackToAccount(input: {
+  account: AccountRecord;
+  logger: Logger;
+  runtimeContract: RuntimeContract;
+  workspace: ExecutionWorkspace;
+}): Promise<void> {
+  const accountRules = input.runtimeContract.fileRules.filter(
+    (rule) => rule.classification === "account" && rule.syncBack === "if-changed",
+  );
+
+  input.logger.info("execution_workspace_sync.start", {
+    accountId: input.account.id,
+    label: input.account.label,
+    sessionId: input.workspace.sessionId,
+    workspaceCodexHome: input.workspace.codexHome,
+    accountStateRoot: input.workspace.accountStateRoot,
+    allowedPatterns: accountRules.map((rule) => rule.pathPattern),
+  });
+
+  for (const rule of accountRules) {
+    await syncRuntimeArtifact({
+      accountStateRoot: input.workspace.accountStateRoot,
+      logger: input.logger,
+      rule,
+      sharedCodexHome: input.workspace.codexHome,
+    });
+  }
+
+  input.logger.info("execution_workspace_sync.complete", {
+    accountId: input.account.id,
+    sessionId: input.workspace.sessionId,
+  });
+}
+
+export async function syncExecutionWorkspaceBackToSharedHome(input: {
+  logger: Logger;
+  runtimeContract: RuntimeContract;
+  sharedCodexHome: string;
+  workspace: ExecutionWorkspace;
+}): Promise<void> {
+  const sharedRules = input.runtimeContract.fileRules.filter(
+    (rule) => rule.classification === "shared" && rule.syncBack === "if-changed",
+  );
+
+  input.logger.info("execution_workspace_shared_sync.start", {
+    accountId: input.workspace.accountId,
+    sessionId: input.workspace.sessionId,
+    workspaceCodexHome: input.workspace.codexHome,
+    sharedCodexHome: input.sharedCodexHome,
+    allowedPatterns: sharedRules.map((rule) => rule.pathPattern),
+  });
+
+  for (const rule of sharedRules) {
+    await syncRuntimeArtifact({
+      accountStateRoot: input.sharedCodexHome,
+      logger: input.logger,
+      rule,
+      sharedCodexHome: input.workspace.codexHome,
+    });
+  }
+
+  input.logger.info("execution_workspace_shared_sync.complete", {
+    accountId: input.workspace.accountId,
+    sessionId: input.workspace.sessionId,
   });
 }
 
@@ -245,11 +313,18 @@ async function syncRuntimeArtifact(input: {
     return;
   }
 
-  await rm(targetPath, { force: true, recursive: true }).catch(() => undefined);
   await mkdir(path.dirname(targetPath), { recursive: true });
   if (isDirectoryPattern(input.rule)) {
-    await cp(sourcePath, targetPath, { recursive: true });
+    await mkdir(targetPath, { recursive: true });
+    await cp(sourcePath, targetPath, { force: true, recursive: true });
+    input.logger.info("account_sync.directory_merged", {
+      pathPattern: input.rule.pathPattern,
+      sourcePath,
+      targetPath,
+      policy: "merge-without-delete",
+    });
   } else {
+    await rm(targetPath, { force: true, recursive: true }).catch(() => undefined);
     await copyFile(sourcePath, targetPath);
   }
 
