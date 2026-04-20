@@ -34,7 +34,7 @@ export function formatSelectionSummary(input: {
     renderMode,
     renderVariant: input.renderVariant,
     columnSet: input.renderVariant === "display-table"
-      ? ["label", "account", "paidAt", "flags", "status", "5h", "weekly", "plan", "source"]
+      ? ["selected", "ranking", "label", "account", "paidAt", "status", "5h", "weekly", "plan", "source"]
       : ["summary-lines"],
     footerBlocks: ["selected-account", "fallback", "execution-note"],
     fallbackReason: input.summary.fallbackReason,
@@ -66,7 +66,7 @@ export function formatSelectionSummary(input: {
     renderVariant: input.renderVariant,
     lineCount,
     columnSet: input.renderVariant === "display-table"
-      ? ["label", "account", "paidAt", "flags", "status", "5h", "weekly", "plan", "source"]
+      ? ["selected", "ranking", "label", "account", "paidAt", "status", "5h", "weekly", "plan", "source"]
       : ["summary-lines"],
     fallbackIncluded: input.summary.fallbackReason !== null,
     footerIncluded: {
@@ -89,10 +89,11 @@ function renderDisplayTable(input: {
   summary: SelectionSummary;
 }): string {
   const columns: SelectionSummaryTableColumn[] = [
+    { header: "Sel", key: "selected" },
+    { align: "right", header: "Ranking", key: "ranking" },
     { header: "Label", key: "label" },
-    { header: "Account ID", key: "account" },
+    { header: "Account id", key: "account" },
     { header: "Payed at", key: "paidAt" },
-    { header: "Flags", key: "flags" },
     { header: "Status", key: "status" },
     { align: "right", header: "5h", key: "fiveHour" },
     { align: "right", header: "Weekly", key: "weekly" },
@@ -107,11 +108,35 @@ function renderDisplayTable(input: {
       columns,
       footerLines: input.footerLines,
       logger: input.logger,
-      rows: input.summary.entries.map((entry) =>
-        formatSelectionTableRow(entry, input.capabilities, input.logger)
+      rows: sortEntriesForDisplay(input.summary.entries).map((entry) =>
+        formatSelectionTableRow(entry, input.capabilities, input.logger, input.now)
       ),
     }),
   ].join("\n");
+}
+
+function sortEntriesForDisplay(entries: SelectionSummaryEntry[]): SelectionSummaryEntry[] {
+  return entries
+    .map((entry, originalIndex) => ({ entry, originalIndex }))
+    .sort((left, right) => {
+      const leftRank = left.entry.rankingPosition;
+      const rightRank = right.entry.rankingPosition;
+
+      if (leftRank !== null && rightRank !== null) {
+        return leftRank - rightRank;
+      }
+
+      if (leftRank !== null) {
+        return -1;
+      }
+
+      if (rightRank !== null) {
+        return 1;
+      }
+
+      return left.originalIndex - right.originalIndex;
+    })
+    .map(({ entry }) => entry);
 }
 
 function renderExecutionSummary(input: {
@@ -177,6 +202,7 @@ function formatSelectionTableRow(
   entry: SelectionSummaryEntry,
   capabilities: SummaryRenderCapabilities,
   logger: Logger,
+  now: Date,
 ): Record<string, string> {
   const status = resolveStatus(entry);
 
@@ -187,12 +213,13 @@ function formatSelectionTableRow(
       mapRemainingTone(entry.snapshot?.dailyRemaining ?? null),
       formatPercent(entry.snapshot?.dailyRemaining ?? null),
     ),
-    flags: formatSelectionTags(entry) || "-",
     label: entry.account.label,
-    paidAt: formatPaidAt(entry, logger),
+    paidAt: formatPaidAt(entry, capabilities, logger, now),
     plan: entry.snapshot?.plan
       ? colorize(capabilities, "planValue", entry.snapshot.plan)
       : "-",
+    ranking: entry.rankingPosition !== null ? String(entry.rankingPosition) : "",
+    selected: entry.isSelected ? "+" : "",
     source: colorize(capabilities, "source", entry.source),
     status: colorize(capabilities, mapStatusTone(status), status),
     weekly: colorize(
@@ -205,7 +232,9 @@ function formatSelectionTableRow(
 
 function formatPaidAt(
   entry: SelectionSummaryEntry,
+  capabilities: SummaryRenderCapabilities,
   logger: Logger,
+  now: Date,
 ): string {
   logger.debug("selection.format_paid_at.start", {
     accountId: entry.account.id,
@@ -232,13 +261,58 @@ function formatPaidAt(
     return "-";
   }
 
+  const daysRemaining = calculateDaysUntilNextPayment(normalizedDate, now);
+  const tone = mapPaymentDateTone(daysRemaining);
+
   logger.debug("selection.format_paid_at.complete", {
     accountId: entry.account.id,
     formattedPaidAt: entry.paidAt.displayValue,
     source: entry.paidAt.source,
   });
 
-  return entry.paidAt.displayValue;
+  return colorize(capabilities, tone, entry.paidAt.displayValue);
+}
+
+function calculateDaysUntilNextPayment(paidAt: Date, now: Date): number {
+  const today = toDateOnlyTimestamp(now);
+  const paymentDay = paidAt.getUTCDate();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth();
+  const thisMonthPayment = buildMonthlyAnniversaryTimestamp(
+    currentYear,
+    currentMonth,
+    paymentDay,
+  );
+  const nextPayment = thisMonthPayment < today
+    ? buildMonthlyAnniversaryTimestamp(currentYear, currentMonth + 1, paymentDay)
+    : thisMonthPayment;
+
+  return Math.round((nextPayment - today) / DAY_IN_MS);
+}
+
+function buildMonthlyAnniversaryTimestamp(
+  year: number,
+  month: number,
+  preferredDay: number,
+): number {
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return Date.UTC(year, month, Math.min(preferredDay, lastDay));
+}
+
+function toDateOnlyTimestamp(value: Date): number {
+  return Date.UTC(value.getFullYear(), value.getMonth(), value.getDate());
+}
+
+function mapPaymentDateTone(daysRemaining: number): "success" | "warning" | "error" {
+  if (daysRemaining > 14) {
+    return "success";
+  }
+
+  if (daysRemaining >= 5) {
+    return "warning";
+  }
+
+  return "error";
 }
 
 function formatSelectionTags(entry: SelectionSummaryEntry): string {
@@ -397,6 +471,7 @@ function trimTrailingZeroes(value: number): string {
 }
 
 const ANSI_RESET = "\u001b[0m";
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const ANSI_CODES: Record<
   "source" | "success" | "muted" | "warning" | "error" | "tag" | "windowLabel" | "plan" | "planValue",
   string
