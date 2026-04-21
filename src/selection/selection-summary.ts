@@ -16,7 +16,7 @@ import { resolveAccountUsageSnapshots, type AccountUsageResolution } from "./usa
 import type { UsageProbeFailureCategory } from "./usage-client.js";
 import type { NormalizedUsageSnapshot } from "./usage-types.js";
 
-const AUTO_SELECTION_ALLOWED_PLANS = new Set(["plus", "go", "pro"]);
+const AUTO_SELECTION_ALLOWED_PLANS = new Set(["free", "plus", "go", "pro"]);
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const DISABLED_AUTO_SELECTION_BLOCKED_REASON =
   "Remaining-limit selection did not resolve an eligible account because the fallback account is disabled by subscription expiration or plan.";
