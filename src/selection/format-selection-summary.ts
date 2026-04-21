@@ -34,7 +34,7 @@ export function formatSelectionSummary(input: {
     renderMode,
     renderVariant: input.renderVariant,
     columnSet: input.renderVariant === "display-table"
-      ? ["selected", "ranking", "label", "account", "paidAt", "status", "5h", "weekly", "plan", "source"]
+      ? ["selected", "ranking", "label", "account", "expiredAt", "status", "5h", "weekly", "plan", "source"]
       : ["summary-lines"],
     footerBlocks: ["selected-account", "fallback", "execution-note"],
     fallbackReason: input.summary.fallbackReason,
@@ -54,6 +54,8 @@ export function formatSelectionSummary(input: {
     : renderExecutionSummary({
         capabilities: input.capabilities,
         footerLines,
+        logger: input.logger,
+        now: input.now ?? new Date(),
         summary: input.summary,
       });
 
@@ -66,7 +68,7 @@ export function formatSelectionSummary(input: {
     renderVariant: input.renderVariant,
     lineCount,
     columnSet: input.renderVariant === "display-table"
-      ? ["selected", "ranking", "label", "account", "paidAt", "status", "5h", "weekly", "plan", "source"]
+      ? ["selected", "ranking", "label", "account", "expiredAt", "status", "5h", "weekly", "plan", "source"]
       : ["summary-lines"],
     fallbackIncluded: input.summary.fallbackReason !== null,
     footerIncluded: {
@@ -93,7 +95,7 @@ function renderDisplayTable(input: {
     { align: "right", header: "Ranking", key: "ranking" },
     { header: "Label", key: "label" },
     { header: "Account id", key: "account" },
-    { header: "Payed at", key: "paidAt" },
+    { header: "Expired at", key: "expiredAt" },
     { header: "Status", key: "status" },
     { align: "right", header: "5h", key: "fiveHour" },
     { align: "right", header: "Weekly", key: "weekly" },
@@ -142,12 +144,14 @@ function sortEntriesForDisplay(entries: SelectionSummaryEntry[]): SelectionSumma
 function renderExecutionSummary(input: {
   capabilities: SummaryRenderCapabilities;
   footerLines: string[];
+  logger: Logger;
+  now: Date;
   summary: SelectionSummary;
 }): string {
   return [
     "Account selection summary:",
     ...input.summary.entries.map((entry) =>
-      formatSelectionEntry(entry, input.capabilities),
+      formatSelectionEntry(entry, input.capabilities, input.logger, input.now),
     ),
     ...input.footerLines,
   ].join("\n");
@@ -176,6 +180,8 @@ function buildFooterLines(summary: SelectionSummary): string[] {
 function formatSelectionEntry(
   entry: SelectionSummaryEntry,
   capabilities: SummaryRenderCapabilities,
+  logger: Logger,
+  now: Date,
 ): string {
   const tags = formatSelectionTags(entry);
   const status = resolveStatus(entry);
@@ -185,6 +191,7 @@ function formatSelectionEntry(
     "-",
     `${entry.account.label} (${entry.account.id})`,
     tags ? colorize(capabilities, "tag", `[${tags}]`) : null,
+    `expiredAt=${formatExpiredAt(entry, capabilities, logger, now)}`,
     colorize(capabilities, mapStatusTone(status), `status=${status}`),
     formatWindowMetric(capabilities, "5h", entry.snapshot?.dailyRemaining ?? null),
     formatWindowMetric(capabilities, "weekly", entry.snapshot?.weeklyRemaining ?? null),
@@ -214,7 +221,7 @@ function formatSelectionTableRow(
       formatPercent(entry.snapshot?.dailyRemaining ?? null),
     ),
     label: entry.account.label,
-    paidAt: formatPaidAt(entry, capabilities, logger, now),
+    expiredAt: formatExpiredAt(entry, capabilities, logger, now),
     plan: entry.snapshot?.plan
       ? colorize(capabilities, "planValue", entry.snapshot.plan)
       : "-",
@@ -230,80 +237,63 @@ function formatSelectionTableRow(
   };
 }
 
-function formatPaidAt(
+function formatExpiredAt(
   entry: SelectionSummaryEntry,
   capabilities: SummaryRenderCapabilities,
   logger: Logger,
   now: Date,
 ): string {
-  logger.debug("selection.format_paid_at.start", {
+  logger.debug("selection.format_expired_at.start", {
     accountId: entry.account.id,
-    paidAt: entry.paidAt,
+    expiredAt: entry.expiredAt,
     label: entry.account.label,
+    source: entry.expiredAt.source,
   });
 
-  if (!entry.paidAt.displayValue || !entry.paidAt.isoValue) {
-    logger.debug("selection.format_paid_at.complete", {
+  if (!entry.expiredAt.displayValue || !entry.expiredAt.isoValue) {
+    logger.debug("selection.format_expired_at.complete", {
       accountId: entry.account.id,
-      formattedPaidAt: "-",
-      source: "missing",
+      daysRemaining: null,
+      formattedValue: "-",
+      source: entry.expiredAt.source,
     });
     return "-";
   }
 
-  const normalizedDate = new Date(entry.paidAt.isoValue);
-  if (Number.isNaN(normalizedDate.getTime())) {
-    logger.warn("selection.format_paid_at.invalid", {
+  const expirationDate = new Date(entry.expiredAt.isoValue);
+  if (Number.isNaN(expirationDate.getTime())) {
+    logger.warn("selection.format_expired_at.invalid", {
       accountId: entry.account.id,
-      paidAt: entry.paidAt,
+      expiredAt: entry.expiredAt,
       label: entry.account.label,
     });
     return "-";
   }
 
-  const daysRemaining = calculateDaysUntilNextPayment(normalizedDate, now);
-  const tone = mapPaymentDateTone(daysRemaining);
+  const daysRemaining = calculateDaysUntilExpiration(expirationDate, now);
+  const tone = mapExpirationDateTone(daysRemaining);
 
-  logger.debug("selection.format_paid_at.complete", {
+  logger.debug("selection.format_expired_at.complete", {
     accountId: entry.account.id,
-    formattedPaidAt: entry.paidAt.displayValue,
-    source: entry.paidAt.source,
+    daysRemaining,
+    formattedValue: entry.expiredAt.displayValue,
+    source: entry.expiredAt.source,
   });
 
-  return colorize(capabilities, tone, entry.paidAt.displayValue);
+  return colorize(capabilities, tone, entry.expiredAt.displayValue);
 }
 
-function calculateDaysUntilNextPayment(paidAt: Date, now: Date): number {
+function calculateDaysUntilExpiration(expirationDate: Date, now: Date): number {
   const today = toDateOnlyTimestamp(now);
-  const paymentDay = paidAt.getUTCDate();
-  const currentYear = now.getFullYear();
-  const currentMonth = now.getMonth();
-  const thisMonthPayment = buildMonthlyAnniversaryTimestamp(
-    currentYear,
-    currentMonth,
-    paymentDay,
-  );
-  const nextPayment = thisMonthPayment < today
-    ? buildMonthlyAnniversaryTimestamp(currentYear, currentMonth + 1, paymentDay)
-    : thisMonthPayment;
-
-  return Math.round((nextPayment - today) / DAY_IN_MS);
-}
-
-function buildMonthlyAnniversaryTimestamp(
-  year: number,
-  month: number,
-  preferredDay: number,
-): number {
-  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  return Date.UTC(year, month, Math.min(preferredDay, lastDay));
+  const expirationDay = toDateOnlyTimestamp(expirationDate);
+  return Math.round((expirationDay - today) / DAY_IN_MS);
 }
 
 function toDateOnlyTimestamp(value: Date): number {
   return Date.UTC(value.getFullYear(), value.getMonth(), value.getDate());
 }
 
-function mapPaymentDateTone(daysRemaining: number): "success" | "warning" | "error" {
+function mapExpirationDateTone(daysRemaining: number): "success" | "warning" | "error" {
   if (daysRemaining > 14) {
     return "success";
   }

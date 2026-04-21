@@ -8,6 +8,10 @@ import type {
   ExperimentalSelectionConfig,
 } from "../config/wrapper-config.js";
 import type { Logger } from "../logging/logger.js";
+import {
+  resolveAccountSubscriptionExpiration,
+  type AccountSubscriptionExpiration,
+} from "./subscription-client.js";
 import { resolveAccountUsageSnapshots, type AccountUsageResolution } from "./usage-probe-coordinator.js";
 import type { UsageProbeFailureCategory } from "./usage-client.js";
 import type { NormalizedUsageSnapshot } from "./usage-types.js";
@@ -29,6 +33,7 @@ export type SelectionSummaryMode = "display-only" | "execution";
 
 export interface SelectionSummaryEntry {
   account: AccountRecord;
+  expiredAt: AccountSubscriptionExpiration;
   paidAt: AccountPaidAt;
   failureCategory: UsageProbeFailureCategory | null;
   failureMessage: string | null;
@@ -89,10 +94,17 @@ export async function resolveSelectionSummary(input: {
     throw new Error("No accounts configured. Add one with `codexes account add <label>`.");
   }
 
+  const expiredAtByAccountId = await resolveExpirationMetadata({
+    accounts,
+    fetchImpl: input.fetchImpl,
+    logger: input.logger,
+    mode,
+  });
   const defaultAccount = await input.registry.getDefaultAccount();
   const summary = await resolveStrategySummary({
     accounts,
     paidAtByAccountId,
+    expiredAtByAccountId,
     defaultAccount,
     experimentalSelection: input.experimentalSelection,
     fetchImpl: input.fetchImpl,
@@ -127,6 +139,7 @@ async function resolveStrategySummary(input: {
   selectionCacheFilePath?: string;
   strategy: AccountSelectionStrategy;
   paidAtByAccountId: Map<string, AccountPaidAt>;
+  expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>;
 }): Promise<SelectionSummary> {
   switch (input.strategy) {
     case "manual-default":
@@ -137,6 +150,7 @@ async function resolveStrategySummary(input: {
         input.defaultAccount,
         input.mode,
         input.paidAtByAccountId,
+        input.expiredAtByAccountId,
       );
     case "single-account":
       return buildSingleAccountSummary(
@@ -146,6 +160,7 @@ async function resolveStrategySummary(input: {
         input.defaultAccount,
         input.mode,
         input.paidAtByAccountId,
+        input.expiredAtByAccountId,
       );
     case "remaining-limit":
     case "remaining-limit-experimental":
@@ -160,6 +175,7 @@ async function buildManualDefaultSummary(
   defaultAccount: AccountRecord | null,
   mode: SelectionSummaryMode,
   paidAtByAccountId: Map<string, AccountPaidAt>,
+  expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>,
 ): Promise<SelectionSummary> {
   const selection = await resolveManualDefaultSelection({
     accounts,
@@ -175,6 +191,7 @@ async function buildManualDefaultSummary(
       defaultAccount,
       selection.selectedAccount,
       paidAtByAccountId,
+      expiredAtByAccountId,
     ),
     executionBlockedReason: selection.executionBlockedReason,
     fallbackReason: null,
@@ -192,6 +209,7 @@ async function buildSingleAccountSummary(
   defaultAccount: AccountRecord | null,
   mode: SelectionSummaryMode,
   paidAtByAccountId: Map<string, AccountPaidAt>,
+  expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>,
 ): Promise<SelectionSummary> {
   const selectedAccount = await selectSingleAccountOnly(registry, logger, accounts, mode);
 
@@ -201,6 +219,7 @@ async function buildSingleAccountSummary(
       defaultAccount,
       selectedAccount,
       paidAtByAccountId,
+      expiredAtByAccountId,
     ),
     executionBlockedReason: null,
     fallbackReason: null,
@@ -222,6 +241,7 @@ async function buildExperimentalSummary(input: {
   selectionCacheFilePath?: string;
   strategy: AccountSelectionStrategy;
   paidAtByAccountId: Map<string, AccountPaidAt>;
+  expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>;
 }): Promise<SelectionSummary> {
   if (!input.experimentalSelection?.enabled || !input.selectionCacheFilePath) {
     input.logger.warn("selection.experimental_config_missing", {
@@ -245,6 +265,7 @@ async function buildExperimentalSummary(input: {
         input.defaultAccount,
         fallbackSelection.selectedAccount,
         input.paidAtByAccountId,
+        input.expiredAtByAccountId,
       ),
       executionBlockedReason: fallbackSelection.executionBlockedReason,
       fallbackReason: "experimental-config-missing",
@@ -303,6 +324,7 @@ async function buildExperimentalSummary(input: {
         selectedAccount: fallbackSelection.selectedAccount,
         selectedCandidateIds: [],
         paidAtByAccountId: input.paidAtByAccountId,
+        expiredAtByAccountId: input.expiredAtByAccountId,
       }),
       executionBlockedReason: fallbackSelection.executionBlockedReason,
       fallbackReason,
@@ -389,6 +411,7 @@ async function buildExperimentalSummary(input: {
         selectedAccount: fallbackSelection.selectedAccount,
         selectedCandidateIds: [],
         paidAtByAccountId: input.paidAtByAccountId,
+        expiredAtByAccountId: input.expiredAtByAccountId,
       }),
       executionBlockedReason: fallbackSelection.executionBlockedReason,
       fallbackReason,
@@ -417,6 +440,7 @@ async function buildExperimentalSummary(input: {
       selectedAccount: selected.account,
       selectedCandidateIds: candidates.map((entry) => entry.account.id),
       paidAtByAccountId: input.paidAtByAccountId,
+      expiredAtByAccountId: input.expiredAtByAccountId,
     }),
     executionBlockedReason: null,
     fallbackReason: null,
@@ -556,9 +580,11 @@ function createUnavailableEntries(
   defaultAccount: AccountRecord | null,
   selectedAccount: AccountRecord | null,
   paidAtByAccountId: Map<string, AccountPaidAt>,
+  expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>,
 ): SelectionSummaryEntry[] {
   return accounts.map((account) => ({
     account,
+    expiredAt: expiredAtByAccountId.get(account.id) ?? emptyExpiration("summary-missing"),
     paidAt: paidAtByAccountId.get(account.id) ?? {
       displayValue: null,
       isoValue: null,
@@ -581,9 +607,11 @@ function createExperimentalEntries(input: {
   selectedAccount: AccountRecord | null;
   selectedCandidateIds: string[];
   paidAtByAccountId: Map<string, AccountPaidAt>;
+  expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>;
 }): SelectionSummaryEntry[] {
   return input.probeResults.map((entry) => ({
     account: entry.account,
+    expiredAt: input.expiredAtByAccountId.get(entry.account.id) ?? emptyExpiration("summary-missing"),
     paidAt: input.paidAtByAccountId.get(entry.account.id) ?? {
       displayValue: null,
       isoValue: null,
@@ -598,6 +626,49 @@ function createExperimentalEntries(input: {
     snapshot: entry.ok ? entry.snapshot : null,
     source: entry.ok ? entry.source : "fresh",
   }));
+}
+
+async function resolveExpirationMetadata(input: {
+  accounts: AccountRecord[];
+  fetchImpl?: typeof fetch;
+  logger: Logger;
+  mode: SelectionSummaryMode;
+}): Promise<Map<string, AccountSubscriptionExpiration>> {
+  input.logger.info("selection.expiration_summary.start", {
+    accountCount: input.accounts.length,
+    mode: input.mode,
+  });
+
+  const results = await Promise.all(
+    input.accounts.map(async (account) => ({
+      accountId: account.id,
+      expiredAt: await resolveAccountSubscriptionExpiration({
+        account,
+        fetchImpl: input.fetchImpl,
+        logger: input.logger,
+      }),
+    })),
+  );
+  const emptyResultCount = results.filter(
+    ({ expiredAt }) => !expiredAt.displayValue || !expiredAt.isoValue,
+  ).length;
+
+  input.logger.debug("selection.expiration_summary.complete", {
+    accountCount: input.accounts.length,
+    emptyResultCount,
+    mode: input.mode,
+    resolvedCount: results.length - emptyResultCount,
+  });
+
+  return new Map(results.map(({ accountId, expiredAt }) => [accountId, expiredAt]));
+}
+
+function emptyExpiration(source: string): AccountSubscriptionExpiration {
+  return {
+    displayValue: null,
+    isoValue: null,
+    source,
+  };
 }
 
 function resolveRankingPosition(selectedCandidateIds: string[], accountId: string): number | null {
