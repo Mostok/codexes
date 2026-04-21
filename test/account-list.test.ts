@@ -267,7 +267,7 @@ test("selection formatter renders expiration values and invalid metadata safely"
   assert.match(rendered, /\| +\| +\| legacy +\| acct-3 +\| 20\.04\.2026 +\| not-probed +\|/);
 });
 
-test("display-only selection keeps usage ranking when subscription expiration fails", async (t) => {
+test("display-only selection keeps eligible usage ranking when subscription expiration fails", async (t) => {
   const tempRoot = await createTempDir("codexes-account-list-subscription-failure");
   t.after(async () => removeTempDir(tempRoot));
 
@@ -327,9 +327,10 @@ test("display-only selection keeps usage ranking when subscription expiration fa
 
   assert.equal(summary.selectedAccount?.id, setup.personal.id);
   assert.equal(summary.entries.find((entry) => entry.account.id === setup.personal.id)?.rankingPosition, 1);
-  assert.equal(summary.entries.find((entry) => entry.account.id === setup.work.id)?.rankingPosition, 2);
+  assert.equal(summary.entries.find((entry) => entry.account.id === setup.work.id)?.rankingPosition, null);
+  assert.equal(summary.entries.find((entry) => entry.account.id === setup.work.id)?.isDisabledForAutoSelection, true);
   assert.match(rendered, /\| \+ +\| +1 +\| personal +\| .* \| - +\| usable +\| +5% +\| +7% +\| pro +\| fresh +\|/);
-  assert.match(rendered, /\| +\| +2 +\| work +\| .* \| - +\| usable +\| +1% +\| +6% +\| free +\| fresh +\|/);
+  assert.match(rendered, /\| +\| +disabled +\| work +\| .* \| - +\| usable +\| +1% +\| +6% +\| free +\| fresh +\|/);
   assertEvent(events, "selection.subscription_expiration.http_error", "debug");
   assert.equal(findEvent(events, "selection.experimental_fallback_mixed_probe_outcomes", "warn"), undefined);
   assert.equal(findEvent(events, "selection.experimental_fallback_all_probes_failed", "warn"), undefined);
@@ -391,7 +392,7 @@ test("display-only selection summary explains mixed probe fallback without an ex
   );
   assert.match(rendered, /Selected account: unavailable for execution\./);
   assert.match(rendered, /Execution note: Multiple accounts are configured but no default account is selected\./);
-  assert.match(rendered, /\| +\| +\| work +\| .* \| 04\.05\.2026 +\| usable +\| +3% +\| +8% +\| free +\| fresh +\|/);
+  assert.match(rendered, /\| +\| +disabled +\| work +\| .* \| 04\.05\.2026 +\| usable +\| +3% +\| +8% +\| free +\| fresh +\|/);
   assert.match(rendered, /\| +\| +\| personal +\| .* \| 15\.05\.2026 +\| probe-failed +\| +unknown +\| +unknown +\| - +\| fresh +\|/);
   assertEvent(events, "selection.display_only_missing_execution_account", "info");
 });

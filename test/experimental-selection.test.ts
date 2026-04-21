@@ -95,41 +95,43 @@ test("experimental selector ranks accounts by remaining percent windows and reus
   assertEvent(events, "selection.experimental_selected", "info");
 });
 
-test("experimental selector falls back when probe outcomes are mixed", async (t) => {
+test("experimental selector blocks fallback when default account is free plan", async (t) => {
   const tempRoot = await createTempDir("codexes-experimental-mixed");
   t.after(async () => removeTempDir(tempRoot));
 
   const { accounts, cacheFilePath } = await createExperimentalAccounts(tempRoot);
   const { events, logger } = createTestLogger();
 
-  const selected = await selectAccountForExecution({
-    experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
-    fetchImpl: async (url, init) => {
-      if (isSubscriptionRequest(url)) {
-        return subscriptionResponse(url);
-      }
+  await assert.rejects(
+    () =>
+      selectAccountForExecution({
+        experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
+        fetchImpl: async (url, init) => {
+          if (isSubscriptionRequest(url)) {
+            return subscriptionResponse(url);
+          }
 
-      const accountId = extractAccountIdHeader(init);
-      if (accountId === "acct-1") {
-        return jsonResponse({
-          rate_limit: {
-            allowed: true,
-            plan: "free",
-            primary_window: { used_percent: 97 },
-            secondary_window: { used_percent: 96 },
-          },
-        });
-      }
+          const accountId = extractAccountIdHeader(init);
+          if (accountId === "acct-1") {
+            return jsonResponse({
+              rate_limit: {
+                allowed: true,
+                plan: "free",
+                primary_window: { used_percent: 97 },
+                secondary_window: { used_percent: 96 },
+              },
+            });
+          }
 
-      throw createNamedError("TimeoutError", "timed out");
-    },
-    logger,
-    registry: createRegistry(accounts, "acct-1"),
-    selectionCacheFilePath: cacheFilePath,
-    strategy: "remaining-limit",
-  });
-
-  assert.equal(selected.id, "acct-1");
+          throw createNamedError("TimeoutError", "timed out");
+        },
+        logger,
+        registry: createRegistry(accounts, "acct-1"),
+        selectionCacheFilePath: cacheFilePath,
+        strategy: "remaining-limit",
+      }),
+    /fallback account is disabled by subscription expiration or plan/i,
+  );
   assertEvent(events, "selection.experimental_fallback_mixed_probe_outcomes", "warn");
 });
 
@@ -179,34 +181,36 @@ test("experimental selector falls back when auth state is malformed", async (t) 
   assertEvent(events, "selection.experimental_fallback_all_probes_failed", "warn");
 });
 
-test("experimental selector falls back when every account is exhausted", async (t) => {
+test("experimental selector blocks fallback when every free-plan account is exhausted", async (t) => {
   const tempRoot = await createTempDir("codexes-experimental-exhausted");
   t.after(async () => removeTempDir(tempRoot));
 
   const { accounts, cacheFilePath } = await createExperimentalAccounts(tempRoot);
   const { events, logger } = createTestLogger();
 
-  const selected = await selectAccountForExecution({
-    experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
-    fetchImpl: async (url) =>
-      isSubscriptionRequest(url)
-        ? subscriptionResponse(url)
-        : jsonResponse({
-        rate_limit: {
-          allowed: true,
-          plan: "free",
-          limit_reached: true,
-          primary_window: { used_percent: 100, limit_reached: true },
-          secondary_window: { used_percent: 100, limit_reached: true },
-        },
+  await assert.rejects(
+    () =>
+      selectAccountForExecution({
+        experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
+        fetchImpl: async (url) =>
+          isSubscriptionRequest(url)
+            ? subscriptionResponse(url)
+            : jsonResponse({
+            rate_limit: {
+              allowed: true,
+              plan: "free",
+              limit_reached: true,
+              primary_window: { used_percent: 100, limit_reached: true },
+              secondary_window: { used_percent: 100, limit_reached: true },
+            },
+          }),
+        logger,
+        registry: createRegistry(accounts, "acct-1"),
+        selectionCacheFilePath: cacheFilePath,
+        strategy: "remaining-limit",
       }),
-    logger,
-    registry: createRegistry(accounts, "acct-1"),
-    selectionCacheFilePath: cacheFilePath,
-    strategy: "remaining-limit",
-  });
-
-  assert.equal(selected.id, "acct-1");
+    /fallback account is disabled by subscription expiration or plan/i,
+  );
   assertEvent(events, "selection.experimental_fallback_all_accounts_exhausted", "warn");
 });
 
