@@ -127,6 +127,183 @@ test("CLI passes unknown args and piped stdin through a single configured accoun
   assert.equal(syncedAuth.last_refresh, "from-child");
 });
 
+test("CLI hides structured fatal logs from user stderr by default", async (t) => {
+  const tempRoot = await createTempDir("codexes-cli-fatal");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const platformState = resolvePlatformStateRoot(tempRoot);
+  const binRoot = path.join(tempRoot, "bin");
+  const fakeCodexScript = path.join(tempRoot, "fake-codex.mjs");
+
+  await mkdir(binRoot, { recursive: true });
+  await writeFile(
+    fakeCodexScript,
+    "process.exit(0);\n",
+    "utf8",
+  );
+  await createCodexShim({ binRoot, scriptPath: fakeCodexScript });
+
+  const childEnv = { ...process.env };
+  delete childEnv.LOCALAPPDATA;
+  delete childEnv.LocalAppData;
+  delete childEnv.localappdata;
+  delete childEnv.XDG_STATE_HOME;
+  delete childEnv.LOG_LEVEL;
+
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "src/cli.ts", "chat"],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...childEnv,
+        PATH: `${binRoot}${path.delimiter}${process.env.PATH ?? ""}`,
+        ...platformState.env,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  child.stdout.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+  child.stderr.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
+
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("exit", (code) => resolve(code ?? 1));
+  });
+
+  const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+  const stderr = Buffer.concat(stderrChunks).toString("utf8");
+
+  assert.equal(exitCode, 1, stderr);
+  assert.equal(stdout.trim(), "");
+  assert.match(stderr, /^codexes: No accounts configured\./m);
+  assert.doesNotMatch(stderr, /bootstrap\.fatal/);
+  assert.doesNotMatch(stderr, /"level":"ERROR"/);
+  assert.doesNotMatch(stderr, /"event":/);
+  assert.doesNotMatch(stderr, /stack/i);
+});
+
+test("CLI sanitizes context initialization failures before app context exists", async (t) => {
+  const tempRoot = await createTempDir("codexes-cli-context-fatal");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const stateRootFile = path.join(tempRoot, "state-root-file");
+  await writeFile(stateRootFile, "not a directory", "utf8");
+
+  const childEnv = { ...process.env };
+  delete childEnv.LOCALAPPDATA;
+  delete childEnv.LocalAppData;
+  delete childEnv.localappdata;
+  delete childEnv.XDG_STATE_HOME;
+  delete childEnv.LOG_LEVEL;
+
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "src/cli.ts", "chat"],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...childEnv,
+        ...resolveBrokenStateRootEnv(stateRootFile),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  child.stdout.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+  child.stderr.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
+
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("exit", (code) => resolve(code ?? 1));
+  });
+
+  const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+  const stderr = Buffer.concat(stderrChunks).toString("utf8");
+
+  assert.equal(exitCode, 1, stderr);
+  assert.equal(stdout.trim(), "");
+  assert.equal(
+    stderr.trim(),
+    "codexes: Command failed. Re-run with LOG_LEVEL=DEBUG to inspect diagnostics.",
+  );
+  assert.doesNotMatch(stderr, /Unhandled/i);
+  assert.doesNotMatch(stderr, /ENOTDIR/);
+  assert.doesNotMatch(stderr, new RegExp(stateRootFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(stderr, /node:fs/i);
+  assert.doesNotMatch(stderr, /"event":/);
+  assert.doesNotMatch(stderr, /stack/i);
+});
+
+
+test("CLI emits debug diagnostics for context initialization failures before app context exists", async (t) => {
+  const tempRoot = await createTempDir("codexes-cli-context-debug");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const stateRootFile = path.join(tempRoot, "state-root-file");
+  await writeFile(stateRootFile, "not a directory", "utf8");
+
+  const childEnv = { ...process.env };
+  delete childEnv.LOCALAPPDATA;
+  delete childEnv.LocalAppData;
+  delete childEnv.localappdata;
+  delete childEnv.XDG_STATE_HOME;
+
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "src/cli.ts", "chat"],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...childEnv,
+        LOG_LEVEL: "DEBUG",
+        ...resolveBrokenStateRootEnv(stateRootFile),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  child.stdout.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+  child.stderr.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
+
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("exit", (code) => resolve(code ?? 1));
+  });
+
+  const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+  const stderr = Buffer.concat(stderrChunks).toString("utf8");
+
+  assert.equal(exitCode, 1, stderr);
+  assert.equal(stdout.trim(), "");
+  assert.match(stderr, /"event":"bootstrap\.bootstrap\.fatal"/);
+  assert.match(stderr, /"phase":"context_initialization"/);
+  assert.match(stderr, /"message":"ENOTDIR:/);
+  assert.match(
+    stderr,
+    /codexes: Command failed. Re-run with LOG_LEVEL=DEBUG to inspect diagnostics./,
+  );
+});
+
+function resolveBrokenStateRootEnv(stateRootFile: string): NodeJS.ProcessEnv {
+  if (process.platform === "win32") {
+    return { LOCALAPPDATA: stateRootFile };
+  }
+
+  if (process.platform === "darwin") {
+    return { HOME: stateRootFile };
+  }
+
+  return { XDG_STATE_HOME: stateRootFile };
+}
+
 function resolvePlatformStateRoot(tempRoot: string): {
   dataRoot: string;
   env: NodeJS.ProcessEnv;

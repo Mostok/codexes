@@ -135,6 +135,39 @@ test("experimental selector blocks fallback when default account is free plan", 
   assertEvent(events, "selection.experimental_fallback_mixed_probe_outcomes", "warn");
 });
 
+test("experimental selector blocks fallback when subscription metadata reports a free default plan", async (t) => {
+  const tempRoot = await createTempDir("codexes-experimental-free-plan-metadata");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { accounts, cacheFilePath } = await createExperimentalAccounts(tempRoot);
+  const { events, logger } = createTestLogger();
+
+  await assert.rejects(
+    () =>
+      selectAccountForExecution({
+        experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
+        fetchImpl: async (url) => {
+          if (isSubscriptionRequest(url)) {
+            const accountId = new URL(String(url)).searchParams.get("account_id");
+            return jsonResponse({
+              active_until: "2026-05-15T00:00:00.000Z",
+              plan_type: accountId === "acct-1" ? "FREE" : "pro",
+            });
+          }
+
+          throw createNamedError("TimeoutError", "timed out");
+        },
+        logger,
+        registry: createRegistry(accounts, "acct-1"),
+        selectionCacheFilePath: cacheFilePath,
+        strategy: "remaining-limit",
+      }),
+    /fallback account is disabled by subscription expiration or plan/i,
+  );
+  assertEvent(events, "selection.experimental_fallback_all_probes_failed", "warn");
+  assertEvent(events, "selection.experimental_fallback_disabled", "debug");
+});
+
 test("experimental selector falls back when all probes fail because auth is missing", async (t) => {
   const tempRoot = await createTempDir("codexes-experimental-auth-missing");
   t.after(async () => removeTempDir(tempRoot));
@@ -156,6 +189,78 @@ test("experimental selector falls back when all probes fail because auth is miss
   assert.equal(selected.id, "acct-1");
   assertEvent(events, "selection.usage_probe.auth_missing", "warn");
   assertEvent(events, "selection.experimental_fallback_all_probes_failed", "warn");
+});
+
+test("experimental selector allows fallback for unknown paid plans", async (t) => {
+  const tempRoot = await createTempDir("codexes-experimental-enterprise-fallback");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { accounts, cacheFilePath } = await createExperimentalAccounts(tempRoot, {
+    omitAuthFor: ["acct-1", "acct-2"],
+  });
+  const { events, logger } = createTestLogger();
+
+  const selected = await selectAccountForExecution({
+    experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
+    fetchImpl: async (url) => {
+      if (isSubscriptionRequest(url)) {
+        const accountId = new URL(String(url)).searchParams.get("account_id");
+        return jsonResponse({
+          active_until: "2026-05-15T00:00:00.000Z",
+          plan_type: accountId === "acct-1" ? "enterprise" : "pro",
+        });
+      }
+
+      return jsonResponse({ allowed: true });
+    },
+    logger,
+    registry: createRegistry(accounts, "acct-1"),
+    selectionCacheFilePath: cacheFilePath,
+    strategy: "remaining-limit",
+  });
+
+  assert.equal(selected.id, "acct-1");
+  assertEvent(events, "selection.usage_probe.auth_missing", "warn");
+  assertEvent(events, "selection.experimental_fallback_all_probes_failed", "warn");
+});
+
+test("experimental selector compares subscription expiration by exact timestamp", async (t) => {
+  const tempRoot = await createTempDir("codexes-experimental-expiration-timestamp");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { accounts, cacheFilePath } = await createExperimentalAccounts(tempRoot);
+  const { logger } = createTestLogger();
+  const pastTimestamp = new Date(Date.now() - 60_000).toISOString();
+  const futureTimestamp = new Date(Date.now() + 60_000).toISOString();
+
+  const selected = await selectAccountForExecution({
+    experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
+    fetchImpl: async (url, init) => {
+      if (isSubscriptionRequest(url)) {
+        const accountId = new URL(String(url)).searchParams.get("account_id");
+        return jsonResponse({
+          active_until: accountId === "acct-1" ? pastTimestamp : futureTimestamp,
+          plan_type: "pro",
+        });
+      }
+
+      const accountId = extractAccountIdHeader(init);
+      return jsonResponse({
+        rate_limit: {
+          allowed: true,
+          plan: "pro",
+          primary_window: { used_percent: accountId === "acct-1" ? 5 : 90 },
+          secondary_window: { used_percent: accountId === "acct-1" ? 5 : 80 },
+        },
+      });
+    },
+    logger,
+    registry: createRegistry(accounts, "acct-1"),
+    selectionCacheFilePath: cacheFilePath,
+    strategy: "remaining-limit",
+  });
+
+  assert.equal(selected.id, "acct-2");
 });
 
 test("experimental selector falls back when auth state is malformed", async (t) => {

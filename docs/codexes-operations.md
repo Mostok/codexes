@@ -197,7 +197,7 @@ Each successful probe is normalized into:
 - `status`: `usable`, `not-allowed`, `limit-reached`, or `missing-usage-data`
 - `statusReason`: human-readable explanation for logs and fallback analysis
 
-Only snapshots with `status = usable` participate in ranking.
+Only snapshots with `status = usable` participate in ranking. A usable snapshot can still be excluded from automatic execution if the companion subscription metadata says the account is already expired or the resolved plan is outside the paid allow-list.
 
 ### Ranking behavior
 
@@ -219,6 +219,7 @@ This means an account with more primary-window headroom wins even if another acc
 - the payload shape is malformed or missing both daily and weekly remaining values
 - every probed account is exhausted
 - every successful snapshot is ambiguous rather than usable
+- the fallback/default account is blocked by subscription expiration or by a `free` plan
 
 The fallback is deliberate. The wrapper prefers a predictable default over making a weak routing decision from partial quota data.
 
@@ -236,6 +237,7 @@ The remaining-limit path is covered by automated tests for:
 - mixed success and timeout outcomes
 - missing and malformed auth state
 - fully exhausted accounts
+- subscription metadata that blocks expired or `free` fallback accounts
 - invalid response payloads and corrupt cache files
 - display-only account-list table rendering in plain and TTY modes
 - execution summary regression coverage to prevent table formatting from leaking into wrapped launches
@@ -255,7 +257,7 @@ Expected log properties:
 - auth tokens and other raw secrets are not logged
 - runtime paths, selector decisions, lock behavior, and spawn failures are logged with context
 
-The human-readable account summary is regular CLI output on stdout. Structured logs stay separate on stderr and should be treated as diagnostics, not as the primary user-facing explanation of selection behavior.
+The human-readable account summary is regular CLI output on stdout. Structured logs are suppressed from normal CLI stderr by default; set `LOG_LEVEL=DEBUG` when you need the raw diagnostic event stream. Regular stderr should therefore stay reserved for controlled top-level error messages.
 
 Useful events:
 

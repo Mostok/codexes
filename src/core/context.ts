@@ -1,4 +1,12 @@
-import { createLogSink, createLogger, resolveLogLevel } from "../logging/logger.js";
+import {
+  createLogSink,
+  createLogger,
+  createSilentLogSink,
+  type Logger,
+  resolveLogLevel,
+  type LogLevel,
+  type LogSink,
+} from "../logging/logger.js";
 import { resolveWrapperConfig } from "../config/wrapper-config.js";
 import { resolvePaths } from "./paths.js";
 import { findCodexBinary } from "../process/find-codex-binary.js";
@@ -21,12 +29,38 @@ export interface AppContext {
   };
   logging: {
     level: string;
-    sink: ReturnType<typeof createLogSink>;
+    sink: LogSink;
   };
   paths: ReturnType<typeof resolvePaths>;
   runtimeInitialization: Awaited<ReturnType<typeof initializeRuntimeEnvironment>>;
   wrapperConfig: Awaited<ReturnType<typeof resolveWrapperConfig>>;
   codexBinary: Awaited<ReturnType<typeof findCodexBinary>>;
+}
+
+export interface AppLoggingContext {
+  level: LogLevel;
+  sink: LogSink;
+  logger: Logger;
+}
+
+export function createAppLoggingContext(input: {
+  env: NodeJS.ProcessEnv;
+  stderr: NodeJS.WriteStream;
+  loggerName?: string;
+}): AppLoggingContext {
+  const level = resolveLogLevel(input.env.LOG_LEVEL);
+  // Keep structured diagnostics available in DEBUG mode without polluting user stderr by default.
+  const sink = level === "DEBUG" ? createLogSink(input.stderr) : createSilentLogSink();
+
+  return {
+    level,
+    sink,
+    logger: createLogger({
+      level,
+      name: input.loggerName ?? "context",
+      sink,
+    }),
+  };
 }
 
 export async function buildAppContext(
@@ -39,45 +73,43 @@ export async function buildAppContext(
     stderr: NodeJS.WriteStream;
   },
 ): Promise<AppContext> {
-  const logLevel = resolveLogLevel(io.env.LOG_LEVEL);
-  const sink = createLogSink(io.stderr);
+  const logging = createAppLoggingContext({
+    env: io.env,
+    stderr: io.stderr,
+  });
   const paths = resolvePaths(io.cwd, io.env);
   const runtimeInitialization = await initializeRuntimeEnvironment({
     env: io.env,
     logger: createLogger({
-      level: logLevel,
+      level: logging.level,
       name: "runtime",
-      sink,
+      sink: logging.sink,
     }),
     paths,
   });
   const wrapperConfig = await resolveWrapperConfig({
     env: io.env,
     logger: createLogger({
-      level: logLevel,
+      level: logging.level,
       name: "config",
-      sink,
+      sink: logging.sink,
     }),
     paths,
   });
   const codexBinary = await findCodexBinary({
     env: io.env,
     logger: createLogger({
-      level: logLevel,
+      level: logging.level,
       name: "process",
-      sink,
+      sink: logging.sink,
     }),
     wrapperExecutablePath: io.executablePath,
   });
 
-  createLogger({
-    level: logLevel,
-    name: "context",
-    sink,
-  }).debug("initialized", {
+  logging.logger.debug("initialized", {
     argv,
     cwd: io.cwd,
-    logLevel,
+    logLevel: logging.level,
     paths,
     runtimeInitialization,
     wrapperConfig,
@@ -100,8 +132,8 @@ export async function buildAppContext(
       stdoutIsTTY: io.stdout.isTTY === true,
     },
     logging: {
-      level: logLevel,
-      sink,
+      level: logging.level,
+      sink: logging.sink,
     },
     paths,
     runtimeInitialization,

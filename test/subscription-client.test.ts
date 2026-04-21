@@ -36,6 +36,7 @@ test("subscription client requests active_until with stored auth and browser-lik
   assert.deepEqual(result, {
     displayValue: "15.05.2026",
     isoValue: "2026-05-15T05:58:25.000Z",
+    plan: null,
     source: "active_until",
   });
   assert.equal(calls.length, 1);
@@ -140,7 +141,28 @@ test("subscription client returns empty metadata when active_until is missing", 
     logger,
   });
 
-  assert.deepEqual(result, emptyExpiration("active-until-missing"));
+  assert.deepEqual(result, emptyExpiration("active-until-missing", "plus"));
+  assertEvent(events, "selection.subscription_expiration.active_until_missing", "debug");
+});
+
+test("subscription client keeps normalized plan metadata when active_until is missing", async (t) => {
+  const tempRoot = await createTempDir("codexes-subscription-missing-active-until-plan");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const account = createAccount(tempRoot);
+  await writeAuthState(account, {
+    accessToken: "synthetic-access-token",
+    accountId: "auth-account-123",
+  });
+  const { events, logger } = createTestLogger();
+
+  const result = await resolveAccountSubscriptionExpiration({
+    account,
+    fetchImpl: async () => jsonResponse({ plan_type: "FREE" }),
+    logger,
+  });
+
+  assert.deepEqual(result, emptyExpiration("active-until-missing", "free"));
   assertEvent(events, "selection.subscription_expiration.active_until_missing", "debug");
 });
 
@@ -231,14 +253,19 @@ function jsonResponse(value: unknown): Response {
   });
 }
 
-function emptyExpiration(source: string): {
+function emptyExpiration(
+  source: string,
+  plan: string | null = null,
+): {
   displayValue: null;
   isoValue: null;
+  plan: string | null;
   source: string;
 } {
   return {
     displayValue: null,
     isoValue: null,
+    plan,
     source,
   };
 }

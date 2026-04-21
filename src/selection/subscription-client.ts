@@ -10,6 +10,7 @@ const BROWSER_LIKE_USER_AGENT =
 export interface AccountSubscriptionExpiration {
   displayValue: string | null;
   isoValue: string | null;
+  plan: string | null;
   source: string;
 }
 
@@ -33,7 +34,7 @@ export async function resolveAccountSubscriptionExpiration(input: {
       label: input.account.label,
       category: authState.category,
     });
-    return completeWithEmptyResult(input, "auth-missing");
+    return completeWithEmptyResult(input, { plan: null, source: "auth-missing" });
   }
 
   try {
@@ -51,18 +52,20 @@ export async function resolveAccountSubscriptionExpiration(input: {
         label: input.account.label,
         status: response.status,
       });
-      return completeWithEmptyResult(input, "http-error");
+      return completeWithEmptyResult(input, { plan: null, source: "http-error" });
     }
 
     const body = await readSubscriptionJson(response, input);
+    const plan = normalizeSubscriptionPlan(readSubscriptionPlan(body));
     const activeUntil = readActiveUntilValue(body);
     if (!activeUntil.present) {
       input.logger.debug("selection.subscription_expiration.active_until_missing", {
         accountId: input.account.id,
         label: input.account.label,
         bodyShape: describeJsonShape(body),
+        plan,
       });
-      return completeWithEmptyResult(input, "active-until-missing");
+      return completeWithEmptyResult(input, { plan, source: "active-until-missing" });
     }
 
     const isoValue = normalizeActiveUntilValue(activeUntil.value);
@@ -71,8 +74,9 @@ export async function resolveAccountSubscriptionExpiration(input: {
         accountId: input.account.id,
         label: input.account.label,
         candidateType: typeof activeUntil.value,
+        plan,
       });
-      return completeWithEmptyResult(input, "active-until-invalid");
+      return completeWithEmptyResult(input, { plan, source: "active-until-invalid" });
     }
 
     const displayValue = formatSubscriptionExpirationDisplay(isoValue);
@@ -81,25 +85,28 @@ export async function resolveAccountSubscriptionExpiration(input: {
         accountId: input.account.id,
         label: input.account.label,
         candidateType: "normalized-date",
+        plan,
       });
-      return completeWithEmptyResult(input, "active-until-invalid");
+      return completeWithEmptyResult(input, { plan, source: "active-until-invalid" });
     }
 
     input.logger.debug("selection.subscription_expiration.resolve_complete", {
       accountId: input.account.id,
       label: input.account.label,
       displayValue,
+      plan,
       source: "active_until",
     });
 
     return {
       displayValue,
       isoValue,
+      plan,
       source: "active_until",
     };
   } catch (error) {
     if (error instanceof InvalidSubscriptionJsonError) {
-      return completeWithEmptyResult(input, "invalid-json");
+      return completeWithEmptyResult(input, { plan: null, source: "invalid-json" });
     }
 
     if (isAbortError(error)) {
@@ -108,7 +115,7 @@ export async function resolveAccountSubscriptionExpiration(input: {
         label: input.account.label,
         timeoutMs: SUBSCRIPTION_TIMEOUT_MS,
       });
-      return completeWithEmptyResult(input, "timeout");
+      return completeWithEmptyResult(input, { plan: null, source: "timeout" });
     }
 
     input.logger.debug("selection.subscription_expiration.request_failed", {
@@ -116,7 +123,7 @@ export async function resolveAccountSubscriptionExpiration(input: {
       label: input.account.label,
       message: error instanceof Error ? error.message : String(error),
     });
-    return completeWithEmptyResult(input, "request-failed");
+    return completeWithEmptyResult(input, { plan: null, source: "request-failed" });
   }
 }
 
@@ -205,22 +212,30 @@ function completeWithEmptyResult(
     account: AccountRecord;
     logger: Logger;
   },
-  source: string,
+  result: {
+    plan: string | null;
+    source: string;
+  },
 ): AccountSubscriptionExpiration {
   input.logger.debug("selection.subscription_expiration.resolve_complete", {
     accountId: input.account.id,
     label: input.account.label,
     displayValue: "-",
-    source,
+    plan: result.plan,
+    source: result.source,
   });
 
-  return emptyExpiration(source);
+  return emptyExpiration(result.source, result.plan);
 }
 
-function emptyExpiration(source: string): AccountSubscriptionExpiration {
+function emptyExpiration(
+  source: string,
+  plan: string | null = null,
+): AccountSubscriptionExpiration {
   return {
     displayValue: null,
     isoValue: null,
+    plan,
     source,
   };
 }
@@ -231,6 +246,26 @@ function readActiveUntilValue(body: unknown): { present: boolean; value: unknown
   }
 
   return { present: true, value: body.active_until };
+}
+
+function readSubscriptionPlan(body: unknown): unknown {
+  if (!isRecord(body)) {
+    return null;
+  }
+
+  if (typeof body.plan === "string") {
+    return body.plan;
+  }
+
+  if (typeof body.plan_type === "string") {
+    return body.plan_type;
+  }
+
+  if (typeof body.subscription_plan === "string") {
+    return body.subscription_plan;
+  }
+
+  return null;
 }
 
 function normalizeActiveUntilValue(value: unknown): string | null {
@@ -245,6 +280,15 @@ function normalizeActiveUntilValue(value: unknown): string | null {
 
   const timestamp = new Date(normalizedValue);
   return Number.isNaN(timestamp.getTime()) ? null : timestamp.toISOString();
+}
+
+function normalizeSubscriptionPlan(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalizedValue = value.trim();
+  return normalizedValue.length === 0 ? null : normalizedValue.toLowerCase();
 }
 
 function describeJsonShape(value: unknown): string {

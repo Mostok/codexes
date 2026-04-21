@@ -16,8 +16,8 @@ import { resolveAccountUsageSnapshots, type AccountUsageResolution } from "./usa
 import type { UsageProbeFailureCategory } from "./usage-client.js";
 import type { NormalizedUsageSnapshot } from "./usage-types.js";
 
-const AUTO_SELECTION_ALLOWED_PLANS = new Set(["plus", "go", "pro"]);
-const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const DISABLED_SELECTION_BLOCKED_REASON =
+  "Selected account is disabled by subscription expiration or plan and cannot be used.";
 const DISABLED_AUTO_SELECTION_BLOCKED_REASON =
   "Remaining-limit selection did not resolve an eligible account because the fallback account is disabled by subscription expiration or plan.";
 
@@ -183,12 +183,25 @@ async function buildManualDefaultSummary(
   paidAtByAccountId: Map<string, AccountPaidAt>,
   expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>,
 ): Promise<SelectionSummary> {
-  const selection = await resolveManualDefaultSelection({
-    accounts,
+  const now = new Date();
+  const selection = removeDisabledSelection({
+    blockedReason: DISABLED_SELECTION_BLOCKED_REASON,
+    disabledRule: "execution",
+    expiredAtByAccountId,
     logger,
-    mode,
-    registry,
-    strategy: "manual-default",
+    now,
+    probeResults: [],
+    selection: await resolveManualDefaultSelection({
+      accounts,
+      expiredAtByAccountId,
+      logger,
+      mode,
+      now,
+      preselectDisabledRule: "execution",
+      registry,
+      strategy: "manual-default",
+    }),
+    selectionDisabledEvent: "selection.manual_default_disabled",
   });
 
   return {
@@ -217,21 +230,39 @@ async function buildSingleAccountSummary(
   paidAtByAccountId: Map<string, AccountPaidAt>,
   expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>,
 ): Promise<SelectionSummary> {
-  const selectedAccount = await selectSingleAccountOnly(registry, logger, accounts, mode);
+  const now = new Date();
+  const selection = removeDisabledSelection({
+    blockedReason: DISABLED_SELECTION_BLOCKED_REASON,
+    disabledRule: "execution",
+    expiredAtByAccountId,
+    logger,
+    now,
+    probeResults: [],
+    selection: {
+      executionBlockedReason: null,
+      selectedAccount: await selectSingleAccountOnly(registry, logger, accounts, mode, {
+        disabledRule: "execution",
+        expiredAtByAccountId,
+        now,
+      }),
+      selectedBy: "single-account",
+    },
+    selectionDisabledEvent: "selection.single_account_disabled",
+  });
 
   return {
     entries: createUnavailableEntries(
       accounts,
       defaultAccount,
-      selectedAccount,
+      selection.selectedAccount,
       paidAtByAccountId,
       expiredAtByAccountId,
     ),
-    executionBlockedReason: null,
+    executionBlockedReason: selection.executionBlockedReason,
     fallbackReason: null,
     mode,
-    selectedAccount,
-    selectedBy: "single-account",
+    selectedAccount: selection.selectedAccount,
+    selectedBy: selection.selectedBy,
     strategy: "single-account",
   };
 }
@@ -256,19 +287,27 @@ async function buildExperimentalSummary(input: {
       mode: input.mode,
     });
 
+    const fallbackNow = new Date();
     const fallbackSelection = await resolveManualDefaultSelection({
       accounts: input.accounts,
+      expiredAtByAccountId: input.expiredAtByAccountId,
       fallbackReason: "experimental-config-missing",
       logger: input.logger,
       mode: input.mode,
+      now: fallbackNow,
+      preselectDisabledRule: "auto",
       registry: input.registry,
       strategy: input.strategy,
     });
-    const eligibleFallbackSelection = removeDisabledFallbackSelection({
+    const eligibleFallbackSelection = removeDisabledSelection({
+      blockedReason: DISABLED_AUTO_SELECTION_BLOCKED_REASON,
+      disabledRule: "auto",
       expiredAtByAccountId: input.expiredAtByAccountId,
-      fallbackSelection,
-      now: new Date(),
+      logger: input.logger,
+      now: fallbackNow,
       probeResults: [],
+      selection: fallbackSelection,
+      selectionDisabledEvent: "selection.experimental_fallback_disabled",
     });
 
     return {
@@ -314,19 +353,27 @@ async function buildExperimentalSummary(input: {
       },
     );
 
+    const fallbackNow = new Date();
     const fallbackSelection = await resolveManualDefaultSelection({
       accounts: input.accounts,
+      expiredAtByAccountId: input.expiredAtByAccountId,
       fallbackReason,
       logger: input.logger,
       mode: input.mode,
+      now: fallbackNow,
+      preselectDisabledRule: "auto",
       registry: input.registry,
       strategy: input.strategy,
     });
-    const eligibleFallbackSelection = removeDisabledFallbackSelection({
+    const eligibleFallbackSelection = removeDisabledSelection({
+      blockedReason: DISABLED_AUTO_SELECTION_BLOCKED_REASON,
+      disabledRule: "auto",
       expiredAtByAccountId: input.expiredAtByAccountId,
-      fallbackSelection,
-      now: new Date(),
+      logger: input.logger,
+      now: fallbackNow,
       probeResults,
+      selection: fallbackSelection,
+      selectionDisabledEvent: "selection.experimental_fallback_disabled",
     });
     logExperimentalFallbackSelection(input.logger, {
       fallbackReason,
@@ -359,14 +406,28 @@ async function buildExperimentalSummary(input: {
     .filter((entry) => {
       const expiredAt =
         input.expiredAtByAccountId.get(entry.account.id) ?? emptyExpiration("summary-missing");
-      return (
-        entry.snapshot.status === "usable" &&
-        !isDisabledForAutoSelection({
-          expiredAt,
-          now,
-          snapshot: entry.snapshot,
-        })
-      );
+      if (entry.snapshot.status !== "usable") {
+        return false;
+      }
+
+      const disabledReason = resolveAutoSelectionDisabledReason({
+        expiredAt,
+        now,
+        snapshot: entry.snapshot,
+      });
+      if (!disabledReason) {
+        return true;
+      }
+
+      input.logger.debug("selection.experimental_candidate_disabled", {
+        accountId: entry.account.id,
+        label: entry.account.label,
+        plan: resolveSubscriptionPlanForAutoSelection(expiredAt, entry.snapshot),
+        reason: disabledReason,
+        source: entry.source,
+        subscriptionExpirationIso: expiredAt.isoValue,
+      });
+      return false;
     })
     .sort((left, right) =>
       compareExperimentalCandidates({
@@ -421,17 +482,24 @@ async function buildExperimentalSummary(input: {
 
     const fallbackSelection = await resolveManualDefaultSelection({
       accounts: input.accounts,
+      expiredAtByAccountId: input.expiredAtByAccountId,
       fallbackReason,
       logger: input.logger,
       mode: input.mode,
+      now,
+      preselectDisabledRule: "auto",
       registry: input.registry,
       strategy: input.strategy,
     });
-    const eligibleFallbackSelection = removeDisabledFallbackSelection({
+    const eligibleFallbackSelection = removeDisabledSelection({
+      blockedReason: DISABLED_AUTO_SELECTION_BLOCKED_REASON,
+      disabledRule: "auto",
       expiredAtByAccountId: input.expiredAtByAccountId,
-      fallbackSelection,
+      logger: input.logger,
       now,
       probeResults,
+      selection: fallbackSelection,
+      selectionDisabledEvent: "selection.experimental_fallback_disabled",
     });
     logExperimentalFallbackSelection(input.logger, {
       fallbackReason,
@@ -489,9 +557,12 @@ async function buildExperimentalSummary(input: {
 
 async function resolveManualDefaultSelection(input: {
   accounts: AccountRecord[];
+  expiredAtByAccountId?: Map<string, AccountSubscriptionExpiration>;
   fallbackReason?: SelectionFallbackReason;
   logger: Logger;
   mode: SelectionSummaryMode;
+  now?: Date;
+  preselectDisabledRule?: "auto" | "execution";
   registry: AccountRegistry;
   strategy: AccountSelectionStrategy;
 }): Promise<{
@@ -508,6 +579,14 @@ async function resolveManualDefaultSelection(input: {
 
   const defaultAccount = await input.registry.getDefaultAccount();
   if (defaultAccount) {
+    if (isPreselectedAccountDisabled(defaultAccount, input)) {
+      return {
+        executionBlockedReason: null,
+        selectedAccount: defaultAccount,
+        selectedBy: "manual-default",
+      };
+    }
+
     input.logger.info("selection.manual_default", {
       accountId: defaultAccount.id,
       label: defaultAccount.label,
@@ -527,12 +606,21 @@ async function resolveManualDefaultSelection(input: {
       throw new Error("No accounts configured.");
     }
 
+    if (isPreselectedAccountDisabled(singleAccount, input)) {
+      return {
+        executionBlockedReason: null,
+        selectedAccount: singleAccount,
+        selectedBy: "manual-default-fallback-single",
+      };
+    }
+
     input.logger.info("selection.manual_default_fallback_single", {
       accountId: singleAccount.id,
       label: singleAccount.label,
       mode: input.mode,
       strategy: input.strategy,
     });
+
     return {
       executionBlockedReason: null,
       selectedAccount: await input.registry.selectAccount(singleAccount.id),
@@ -576,6 +664,11 @@ async function selectSingleAccountOnly(
   logger: Logger,
   accounts: AccountRecord[],
   mode: SelectionSummaryMode,
+  preselect?: {
+    disabledRule: "auto" | "execution";
+    expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>;
+    now: Date;
+  },
 ): Promise<AccountRecord> {
   logger.debug("selection.single_account.requirement", {
     mode,
@@ -597,6 +690,17 @@ async function selectSingleAccountOnly(
     throw new Error("No accounts configured.");
   }
 
+  if (
+    preselect &&
+    isPreselectedAccountDisabled(singleAccount, {
+      expiredAtByAccountId: preselect.expiredAtByAccountId,
+      now: preselect.now,
+      preselectDisabledRule: preselect.disabledRule,
+    })
+  ) {
+    return singleAccount;
+  }
+
   logger.info("selection.single_account", {
     accountId: singleAccount.id,
     label: singleAccount.label,
@@ -609,6 +713,35 @@ async function selectSingleAccountOnly(
   }
 
   return registry.selectAccount(singleAccount.id);
+}
+
+function isPreselectedAccountDisabled(
+  account: AccountRecord,
+  input: {
+    expiredAtByAccountId?: Map<string, AccountSubscriptionExpiration>;
+    now?: Date;
+    preselectDisabledRule?: "auto" | "execution";
+  },
+): boolean {
+  if (!input.expiredAtByAccountId || !input.preselectDisabledRule) {
+    return false;
+  }
+
+  const expiredAt = input.expiredAtByAccountId.get(account.id) ?? emptyExpiration("summary-missing");
+  const disabledReason =
+    input.preselectDisabledRule === "auto"
+      ? resolveAutoSelectionDisabledReason({
+          expiredAt,
+          now: input.now ?? new Date(),
+          snapshot: null,
+        })
+      : resolveExecutionSelectionDisabledReason({
+          expiredAt,
+          now: input.now ?? new Date(),
+          snapshot: null,
+        });
+
+  return disabledReason !== null;
 }
 
 function createUnavailableEntries(
@@ -727,6 +860,7 @@ function emptyExpiration(source: string): AccountSubscriptionExpiration {
   return {
     displayValue: null,
     isoValue: null,
+    plan: null,
     source,
   };
 }
@@ -736,12 +870,7 @@ function isDisabledForAutoSelection(input: {
   now: Date;
   snapshot: NormalizedUsageSnapshot | null;
 }): boolean {
-  if (isExpiredForAutoSelection(input.expiredAt, input.now)) {
-    return true;
-  }
-
-  const plan = input.snapshot?.plan?.trim().toLowerCase();
-  return Boolean(plan && !AUTO_SELECTION_ALLOWED_PLANS.has(plan));
+  return resolveAutoSelectionDisabledReason(input) !== null;
 }
 
 function isExpiredForAutoSelection(
@@ -757,11 +886,51 @@ function isExpiredForAutoSelection(
     return false;
   }
 
-  return toDateOnlyTimestamp(expirationDate) <= toDateOnlyTimestamp(now);
+  return expirationDate.getTime() <= now.getTime();
 }
 
-function toDateOnlyTimestamp(value: Date): number {
-  return Date.UTC(value.getFullYear(), value.getMonth(), value.getDate()) / DAY_IN_MS;
+function resolveAutoSelectionDisabledReason(input: {
+  expiredAt: AccountSubscriptionExpiration;
+  now: Date;
+  snapshot: NormalizedUsageSnapshot | null;
+}): "expired" | "free_plan" | null {
+  if (isExpiredForAutoSelection(input.expiredAt, input.now)) {
+    return "expired";
+  }
+
+  const plan = resolveSubscriptionPlanForAutoSelection(input.expiredAt, input.snapshot);
+  if (!plan) {
+    return null;
+  }
+
+  return plan === "free" ? "free_plan" : null;
+}
+
+function resolveExecutionSelectionDisabledReason(input: {
+  expiredAt: AccountSubscriptionExpiration;
+  now: Date;
+  snapshot: NormalizedUsageSnapshot | null;
+}): "expired" | "free_plan" | null {
+  if (isExpiredForAutoSelection(input.expiredAt, input.now)) {
+    return "expired";
+  }
+
+  return resolveSubscriptionPlanForAutoSelection(input.expiredAt, input.snapshot) === "free"
+    ? "free_plan"
+    : null;
+}
+
+function resolveSubscriptionPlanForAutoSelection(
+  expiredAt: AccountSubscriptionExpiration,
+  snapshot: NormalizedUsageSnapshot | null,
+): string | null {
+  const subscriptionPlan = expiredAt.plan?.trim().toLowerCase();
+  if (subscriptionPlan) {
+    return subscriptionPlan;
+  }
+
+  const usagePlan = snapshot?.plan?.trim().toLowerCase();
+  return usagePlan || null;
 }
 
 function resolveRankingPosition(selectedCandidateIds: string[], accountId: string): number | null {
@@ -773,23 +942,27 @@ function resolveRankingPosition(selectedCandidateIds: string[], accountId: strin
   return index + 1;
 }
 
-function removeDisabledFallbackSelection(input: {
+function removeDisabledSelection(input: {
+  blockedReason: string;
+  disabledRule: "auto" | "execution";
   expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>;
-  fallbackSelection: {
+  selection: {
     executionBlockedReason: string | null;
     selectedAccount: AccountRecord | null;
-    selectedBy: "manual-default" | "manual-default-fallback-single" | null;
+    selectedBy: SelectionDecisionMode | null;
   };
+  logger: Logger;
   now: Date;
   probeResults: AccountUsageResolution[];
+  selectionDisabledEvent: string;
 }): {
   executionBlockedReason: string | null;
   selectedAccount: AccountRecord | null;
-  selectedBy: "manual-default" | "manual-default-fallback-single" | null;
+  selectedBy: SelectionDecisionMode | null;
 } {
-  const selectedAccount = input.fallbackSelection.selectedAccount;
+  const selectedAccount = input.selection.selectedAccount;
   if (!selectedAccount) {
-    return input.fallbackSelection;
+    return input.selection;
   }
 
   const probeResult = input.probeResults.find((entry) => entry.account.id === selectedAccount.id);
@@ -797,12 +970,33 @@ function removeDisabledFallbackSelection(input: {
   const expiredAt =
     input.expiredAtByAccountId.get(selectedAccount.id) ?? emptyExpiration("summary-missing");
 
-  if (!isDisabledForAutoSelection({ expiredAt, now: input.now, snapshot })) {
-    return input.fallbackSelection;
+  const disabledReason =
+    input.disabledRule === "auto"
+      ? resolveAutoSelectionDisabledReason({
+          expiredAt,
+          now: input.now,
+          snapshot,
+        })
+      : resolveExecutionSelectionDisabledReason({
+          expiredAt,
+          now: input.now,
+          snapshot,
+        });
+
+  if (!disabledReason) {
+    return input.selection;
   }
 
+  input.logger.debug(input.selectionDisabledEvent, {
+    accountId: selectedAccount.id,
+    label: selectedAccount.label,
+    plan: resolveSubscriptionPlanForAutoSelection(expiredAt, snapshot),
+    reason: disabledReason,
+    subscriptionExpirationIso: expiredAt.isoValue,
+  });
+
   return {
-    executionBlockedReason: DISABLED_AUTO_SELECTION_BLOCKED_REASON,
+    executionBlockedReason: input.blockedReason,
     selectedAccount: null,
     selectedBy: null,
   };
@@ -858,7 +1052,7 @@ function logExperimentalFallbackSelection(
     fallbackReason: SelectionFallbackReason;
     mode: SelectionSummaryMode;
     selectedAccount: AccountRecord | null;
-    selectedBy: "manual-default" | "manual-default-fallback-single" | null;
+    selectedBy: SelectionDecisionMode | null;
   },
 ): void {
   logger.info("selection.experimental_fallback_selected", {

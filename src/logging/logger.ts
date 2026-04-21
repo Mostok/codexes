@@ -1,4 +1,4 @@
-type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
+export type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
 const LOG_LEVEL_ORDER: Record<LogLevel, number> = {
   DEBUG: 10,
@@ -47,6 +47,12 @@ export function createLogSink(
         })}\n`,
       );
     },
+  };
+}
+
+export function createSilentLogSink(): LogSink {
+  return {
+    write() {},
   };
 }
 
