@@ -38,7 +38,11 @@ test("experimental selector ranks accounts by remaining percent windows and reus
 
   const firstRun = await selectAccountForExecution({
     experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
-    fetchImpl: async (_url, init) => {
+    fetchImpl: async (url, init) => {
+      if (isSubscriptionRequest(url)) {
+        return subscriptionResponse(url);
+      }
+
       const accountId = extractAccountIdHeader(init);
       fetchCalls.push(accountId ?? "missing");
       return jsonResponse(
@@ -73,8 +77,12 @@ test("experimental selector ranks accounts by remaining percent windows and reus
   const { events, logger } = createTestLogger();
   const secondRun = await selectAccountForExecution({
     experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
-    fetchImpl: async () => {
-      throw new Error("cache should have been used");
+    fetchImpl: async (url) => {
+      if (isSubscriptionRequest(url)) {
+        return subscriptionResponse(url);
+      }
+
+      throw new Error("usage cache should have been used");
     },
     logger,
     registry: createRegistry(accounts, "acct-1"),
@@ -96,7 +104,11 @@ test("experimental selector falls back when probe outcomes are mixed", async (t)
 
   const selected = await selectAccountForExecution({
     experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
-    fetchImpl: async (_url, init) => {
+    fetchImpl: async (url, init) => {
+      if (isSubscriptionRequest(url)) {
+        return subscriptionResponse(url);
+      }
+
       const accountId = extractAccountIdHeader(init);
       if (accountId === "acct-1") {
         return jsonResponse({
@@ -176,8 +188,10 @@ test("experimental selector falls back when every account is exhausted", async (
 
   const selected = await selectAccountForExecution({
     experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
-    fetchImpl: async () =>
-      jsonResponse({
+    fetchImpl: async (url) =>
+      isSubscriptionRequest(url)
+        ? subscriptionResponse(url)
+        : jsonResponse({
         rate_limit: {
           allowed: true,
           plan: "free",
@@ -206,7 +220,10 @@ test("experimental selector falls back on invalid response shapes and recovers f
 
   const selected = await selectAccountForExecution({
     experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
-    fetchImpl: async () => new Response(JSON.stringify("bad-shape"), { status: 200 }),
+    fetchImpl: async (url) =>
+      isSubscriptionRequest(url)
+        ? subscriptionResponse(url)
+        : new Response(JSON.stringify("bad-shape"), { status: 200 }),
     logger,
     registry: createRegistry(accounts, "acct-1"),
     selectionCacheFilePath: cacheFilePath,
@@ -228,8 +245,10 @@ test("experimental selector falls back with ambiguous usage only when remaining 
 
   const selected = await selectAccountForExecution({
     experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
-    fetchImpl: async () =>
-      jsonResponse({
+    fetchImpl: async (url) =>
+      isSubscriptionRequest(url)
+        ? subscriptionResponse(url)
+        : jsonResponse({
         rate_limit: {
           allowed: true,
           primary_window: {
@@ -284,7 +303,11 @@ test("experimental execution stays blocking when fallback cannot resolve a defau
     () =>
       selectAccountForExecution({
         experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
-        fetchImpl: async (_url, init) => {
+        fetchImpl: async (url, init) => {
+          if (isSubscriptionRequest(url)) {
+            return subscriptionResponse(url);
+          }
+
           const accountId = extractAccountIdHeader(init);
           if (accountId === "acct-1") {
             return jsonResponse({
@@ -320,7 +343,11 @@ test("execution summary renderer stays compact and never uses the display table"
 
   const summary = await resolveSelectionSummary({
     experimentalSelection: EXPERIMENTAL_SELECTION_CONFIG,
-    fetchImpl: async (_url, init) => {
+    fetchImpl: async (url, init) => {
+      if (isSubscriptionRequest(url)) {
+        return subscriptionResponse(url);
+      }
+
       const accountId = extractAccountIdHeader(init);
       return jsonResponse(
         accountId === "acct-1"
@@ -359,7 +386,7 @@ test("execution summary renderer stays compact and never uses the display table"
     summary,
   });
 
-  assert.match(rendered, /personal \(acct-2\) \[selected, rank #1\] status=usable 5h=5% weekly=7% plan=pro source=fresh detail=rankable/);
+  assert.match(rendered, /personal \(acct-2\) \[selected, rank #1\] expiredAt=15\.05\.2026 status=usable 5h=5% weekly=7% plan=pro source=fresh detail=rankable/);
   assert.match(rendered, /Selected account: personal \(acct-2\) via remaining-limit\./);
   assert.doesNotMatch(rendered, /\| Label +\| Account ID +\|/);
 });
@@ -435,7 +462,11 @@ test("runRootCommand launches the experimentally selected account", async (t) =>
     stdoutChunks,
   });
 
-  t.mock.method(globalThis, "fetch", async (_url, init) => {
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (isSubscriptionRequest(url)) {
+      return subscriptionResponse(url);
+    }
+
     const accountId = extractAccountIdHeader(init);
     return jsonResponse(
       accountId === "acct-1"
@@ -477,9 +508,8 @@ test("runRootCommand launches the experimentally selected account", async (t) =>
     stdoutChunks.join(""),
     /Account selection summary:[\s\S]*Selected account: personal \(([^)]+)\) via remaining-limit\./,
   );
-  assert.match(stdoutChunks.join(""), /5h=4% .*weekly=7% .*plan=pro .*source=fresh/);
-  assert.match(stdoutChunks.join(""), /source=fresh/);
-  assert.doesNotMatch(stdoutChunks.join(""), /\| Label +\| Account ID +\|/);
+  assert.match(stdoutChunks.join(""), /\| \+ +\| +1 +\| personal +\| .* \| 15\.05\.2026 +\| usable +\| 4% +\| +7% +\| pro +\| fresh +\|/);
+  assert.match(stdoutChunks.join(""), /\| Sel +\| +Ranking +\| Label +\| Account id +\| Expired at +\| Status +\|/);
 
   const syncedAuth = JSON.parse(
     await readFile(path.join(personal.authDirectory, "state", "auth.json"), "utf8"),
@@ -490,7 +520,7 @@ test("runRootCommand launches the experimentally selected account", async (t) =>
   assertEvent(events, "root.selection.experimental_selected", "info");
   assert.equal(
     findLoggedEvent(events, "root.summary_rendered", "info")?.details?.renderVariant,
-    "execution-summary",
+    "display-table",
   );
 });
 
@@ -689,6 +719,20 @@ function extractAccountIdHeader(init: RequestInit | undefined): string | null {
 
   const headers = new Headers(init.headers);
   return headers.get("OpenAI-Account-ID");
+}
+
+function isSubscriptionRequest(url: string | URL | Request): boolean {
+  return String(url).startsWith("https://chatgpt.com/backend-api/subscriptions");
+}
+
+function subscriptionResponse(url: string | URL | Request): Response {
+  const accountId = new URL(String(url)).searchParams.get("account_id");
+  return jsonResponse({
+    active_until:
+      accountId === "acct-1"
+        ? "2026-05-04T00:00:00.000Z"
+        : "2026-05-15T00:00:00.000Z",
+  });
 }
 
 function findLoggedEvent(

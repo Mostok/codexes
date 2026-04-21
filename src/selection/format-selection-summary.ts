@@ -34,7 +34,7 @@ export function formatSelectionSummary(input: {
     renderMode,
     renderVariant: input.renderVariant,
     columnSet: input.renderVariant === "display-table"
-      ? ["label", "account", "paidAt", "flags", "status", "5h", "weekly", "plan", "source"]
+      ? ["selected", "ranking", "label", "account", "expiredAt", "status", "5h", "weekly", "plan", "source"]
       : ["summary-lines"],
     footerBlocks: ["selected-account", "fallback", "execution-note"],
     fallbackReason: input.summary.fallbackReason,
@@ -54,6 +54,8 @@ export function formatSelectionSummary(input: {
     : renderExecutionSummary({
         capabilities: input.capabilities,
         footerLines,
+        logger: input.logger,
+        now: input.now ?? new Date(),
         summary: input.summary,
       });
 
@@ -66,7 +68,7 @@ export function formatSelectionSummary(input: {
     renderVariant: input.renderVariant,
     lineCount,
     columnSet: input.renderVariant === "display-table"
-      ? ["label", "account", "paidAt", "flags", "status", "5h", "weekly", "plan", "source"]
+      ? ["selected", "ranking", "label", "account", "expiredAt", "status", "5h", "weekly", "plan", "source"]
       : ["summary-lines"],
     fallbackIncluded: input.summary.fallbackReason !== null,
     footerIncluded: {
@@ -89,10 +91,11 @@ function renderDisplayTable(input: {
   summary: SelectionSummary;
 }): string {
   const columns: SelectionSummaryTableColumn[] = [
+    { header: "Sel", key: "selected" },
+    { align: "right", header: "Ranking", key: "ranking" },
     { header: "Label", key: "label" },
-    { header: "Account ID", key: "account" },
-    { header: "Payed at", key: "paidAt" },
-    { header: "Flags", key: "flags" },
+    { header: "Account id", key: "account" },
+    { header: "Expired at", key: "expiredAt" },
     { header: "Status", key: "status" },
     { align: "right", header: "5h", key: "fiveHour" },
     { align: "right", header: "Weekly", key: "weekly" },
@@ -107,22 +110,48 @@ function renderDisplayTable(input: {
       columns,
       footerLines: input.footerLines,
       logger: input.logger,
-      rows: input.summary.entries.map((entry) =>
-        formatSelectionTableRow(entry, input.capabilities, input.logger)
+      rows: sortEntriesForDisplay(input.summary.entries).map((entry) =>
+        formatSelectionTableRow(entry, input.capabilities, input.logger, input.now)
       ),
     }),
   ].join("\n");
 }
 
+function sortEntriesForDisplay(entries: SelectionSummaryEntry[]): SelectionSummaryEntry[] {
+  return entries
+    .map((entry, originalIndex) => ({ entry, originalIndex }))
+    .sort((left, right) => {
+      const leftRank = left.entry.rankingPosition;
+      const rightRank = right.entry.rankingPosition;
+
+      if (leftRank !== null && rightRank !== null) {
+        return leftRank - rightRank;
+      }
+
+      if (leftRank !== null) {
+        return -1;
+      }
+
+      if (rightRank !== null) {
+        return 1;
+      }
+
+      return left.originalIndex - right.originalIndex;
+    })
+    .map(({ entry }) => entry);
+}
+
 function renderExecutionSummary(input: {
   capabilities: SummaryRenderCapabilities;
   footerLines: string[];
+  logger: Logger;
+  now: Date;
   summary: SelectionSummary;
 }): string {
   return [
     "Account selection summary:",
     ...input.summary.entries.map((entry) =>
-      formatSelectionEntry(entry, input.capabilities),
+      formatSelectionEntry(entry, input.capabilities, input.logger, input.now),
     ),
     ...input.footerLines,
   ].join("\n");
@@ -151,6 +180,8 @@ function buildFooterLines(summary: SelectionSummary): string[] {
 function formatSelectionEntry(
   entry: SelectionSummaryEntry,
   capabilities: SummaryRenderCapabilities,
+  logger: Logger,
+  now: Date,
 ): string {
   const tags = formatSelectionTags(entry);
   const status = resolveStatus(entry);
@@ -160,6 +191,7 @@ function formatSelectionEntry(
     "-",
     `${entry.account.label} (${entry.account.id})`,
     tags ? colorize(capabilities, "tag", `[${tags}]`) : null,
+    `expiredAt=${formatExpiredAt(entry, capabilities, logger, now)}`,
     colorize(capabilities, mapStatusTone(status), `status=${status}`),
     formatWindowMetric(capabilities, "5h", entry.snapshot?.dailyRemaining ?? null),
     formatWindowMetric(capabilities, "weekly", entry.snapshot?.weeklyRemaining ?? null),
@@ -177,6 +209,7 @@ function formatSelectionTableRow(
   entry: SelectionSummaryEntry,
   capabilities: SummaryRenderCapabilities,
   logger: Logger,
+  now: Date,
 ): Record<string, string> {
   const status = resolveStatus(entry);
 
@@ -187,12 +220,13 @@ function formatSelectionTableRow(
       mapRemainingTone(entry.snapshot?.dailyRemaining ?? null),
       formatPercent(entry.snapshot?.dailyRemaining ?? null),
     ),
-    flags: formatSelectionTags(entry) || "-",
     label: entry.account.label,
-    paidAt: formatPaidAt(entry, logger),
+    expiredAt: formatExpiredAt(entry, capabilities, logger, now),
     plan: entry.snapshot?.plan
       ? colorize(capabilities, "planValue", entry.snapshot.plan)
       : "-",
+    ranking: formatRankingCell(entry, capabilities),
+    selected: entry.isSelected ? "+" : "",
     source: colorize(capabilities, "source", entry.source),
     status: colorize(capabilities, mapStatusTone(status), status),
     weekly: colorize(
@@ -203,42 +237,85 @@ function formatSelectionTableRow(
   };
 }
 
-function formatPaidAt(
+function formatRankingCell(
   entry: SelectionSummaryEntry,
-  logger: Logger,
+  capabilities: SummaryRenderCapabilities,
 ): string {
-  logger.debug("selection.format_paid_at.start", {
+  if (entry.rankingPosition !== null) {
+    return String(entry.rankingPosition);
+  }
+
+  return entry.isDisabledForAutoSelection
+    ? colorize(capabilities, "error", "disabled")
+    : "";
+}
+
+function formatExpiredAt(
+  entry: SelectionSummaryEntry,
+  capabilities: SummaryRenderCapabilities,
+  logger: Logger,
+  now: Date,
+): string {
+  logger.debug("selection.format_expired_at.start", {
     accountId: entry.account.id,
-    paidAt: entry.paidAt,
+    expiredAt: entry.expiredAt,
     label: entry.account.label,
+    source: entry.expiredAt.source,
   });
 
-  if (!entry.paidAt.displayValue || !entry.paidAt.isoValue) {
-    logger.debug("selection.format_paid_at.complete", {
+  if (!entry.expiredAt.displayValue || !entry.expiredAt.isoValue) {
+    logger.debug("selection.format_expired_at.complete", {
       accountId: entry.account.id,
-      formattedPaidAt: "-",
-      source: "missing",
+      daysRemaining: null,
+      formattedValue: "-",
+      source: entry.expiredAt.source,
     });
     return "-";
   }
 
-  const normalizedDate = new Date(entry.paidAt.isoValue);
-  if (Number.isNaN(normalizedDate.getTime())) {
-    logger.warn("selection.format_paid_at.invalid", {
+  const expirationDate = new Date(entry.expiredAt.isoValue);
+  if (Number.isNaN(expirationDate.getTime())) {
+    logger.warn("selection.format_expired_at.invalid", {
       accountId: entry.account.id,
-      paidAt: entry.paidAt,
+      expiredAt: entry.expiredAt,
       label: entry.account.label,
     });
     return "-";
   }
 
-  logger.debug("selection.format_paid_at.complete", {
+  const daysRemaining = calculateDaysUntilExpiration(expirationDate, now);
+  const tone = mapExpirationDateTone(daysRemaining);
+
+  logger.debug("selection.format_expired_at.complete", {
     accountId: entry.account.id,
-    formattedPaidAt: entry.paidAt.displayValue,
-    source: entry.paidAt.source,
+    daysRemaining,
+    formattedValue: entry.expiredAt.displayValue,
+    source: entry.expiredAt.source,
   });
 
-  return entry.paidAt.displayValue;
+  return colorize(capabilities, tone, entry.expiredAt.displayValue);
+}
+
+function calculateDaysUntilExpiration(expirationDate: Date, now: Date): number {
+  const today = toDateOnlyTimestamp(now);
+  const expirationDay = toDateOnlyTimestamp(expirationDate);
+  return Math.round((expirationDay - today) / DAY_IN_MS);
+}
+
+function toDateOnlyTimestamp(value: Date): number {
+  return Date.UTC(value.getFullYear(), value.getMonth(), value.getDate());
+}
+
+function mapExpirationDateTone(daysRemaining: number): "success" | "warning" | "error" {
+  if (daysRemaining > 14) {
+    return "success";
+  }
+
+  if (daysRemaining >= 5) {
+    return "warning";
+  }
+
+  return "error";
 }
 
 function formatSelectionTags(entry: SelectionSummaryEntry): string {
@@ -397,6 +474,7 @@ function trimTrailingZeroes(value: number): string {
 }
 
 const ANSI_RESET = "\u001b[0m";
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const ANSI_CODES: Record<
   "source" | "success" | "muted" | "warning" | "error" | "tag" | "windowLabel" | "plan" | "planValue",
   string

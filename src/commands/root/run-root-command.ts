@@ -193,13 +193,13 @@ export async function runRootCommand(context: AppContext): Promise<number> {
       useColor: context.output.stdoutIsTTY,
     },
     logger,
-    renderVariant: "execution-summary",
+    renderVariant: "display-table",
     summary: selectionSummary,
   });
   context.io.stdout.write(formattedSummary);
   logger.info("summary_rendered", {
     mode: selectionSummary.mode,
-    renderVariant: "execution-summary",
+    renderVariant: "display-table",
     strategy: selectionSummary.strategy,
     useColor: context.output.stdoutIsTTY,
     selectedAccountId: activeAccount.id,

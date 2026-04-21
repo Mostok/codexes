@@ -22,7 +22,11 @@ test("account list renders english limit summaries and reuses cached probe data"
   const setup = await createAccountListFixture(tempRoot);
   const firstOutput: string[] = [];
 
-  t.mock.method(globalThis, "fetch", async (_url, init) => {
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (isSubscriptionRequest(url)) {
+      return subscriptionResponseForAccount(setup, url);
+    }
+
     const accountId = extractAccountIdHeader(init);
     return jsonResponse(
       accountId === setup.work.id
@@ -56,14 +60,18 @@ test("account list renders english limit summaries and reuses cached probe data"
 
   assert.equal(await runAccountListCommand(firstContext), 0);
   assert.match(firstOutput.join(""), /Account selection summary:/);
-  assert.match(firstOutput.join(""), /\| Label +\| Account ID +\| Payed at +\| Flags +\| Status +\| +5h +\| +Weekly +\| Plan +\| Source +\|/);
-  assert.match(firstOutput.join(""), /\| personal +\| .* \| 05\.05\.2026 +\| selected, rank #1 +\| usable +\| +5% +\| +7% +\| pro +\| fresh +\|/);
+  assert.match(firstOutput.join(""), /\| Sel +\| +Ranking +\| Label +\| Account id +\| Expired at +\| Status +\| +5h +\| +Weekly +\| Plan +\| Source +\|/);
+  assert.match(firstOutput.join(""), /\| \+ +\| +1 +\| personal +\| .* \| 15\.05\.2026 +\| usable +\| +5% +\| +7% +\| pro +\| fresh +\|/);
   assert.match(firstOutput.join(""), /Selected account: personal/);
   assert.doesNotMatch(firstOutput.join(""), /\u001b\[/);
 
   const secondOutput: string[] = [];
-  t.mock.method(globalThis, "fetch", async () => {
-    throw new Error("cache should satisfy account list");
+  t.mock.method(globalThis, "fetch", async (url) => {
+    if (isSubscriptionRequest(url)) {
+      return subscriptionResponseForAccount(setup, url);
+    }
+
+    throw new Error("usage cache should satisfy account list");
   });
 
   const secondContext = createAccountListContext({
@@ -99,7 +107,11 @@ test("selection formatter adds ANSI color only for TTY-capable output", async (t
   const setup = await createAccountListFixture(tempRoot);
   const { logger } = createTestLogger();
 
-  t.mock.method(globalThis, "fetch", async (_url, init) => {
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (isSubscriptionRequest(url)) {
+      return subscriptionResponseForAccount(setup, url);
+    }
+
     const accountId = extractAccountIdHeader(init);
     return jsonResponse(
       accountId === setup.work.id
@@ -144,14 +156,14 @@ test("selection formatter adds ANSI color only for TTY-capable output", async (t
 
   assert.doesNotMatch(plainRendered, /\u001b\[/);
   assert.match(colorRendered, /\u001b\[/);
-  assert.match(colorRendered, /\| Label +\| Account ID +\| Payed at +\| Flags +\| Status +\| +5h +\| +Weekly +\| Plan +\| Source +\|/);
-  assert.match(colorRendered, /\| personal +\| .* \| 05\.05\.2026 +\| selected, rank #1 +\| \u001b\[32musable\u001b\[0m +\|/);
+  assert.match(colorRendered, /\| Sel +\| +Ranking +\| Label +\| Account id +\| Expired at +\| Status +\| +5h +\| +Weekly +\| Plan +\| Source +\|/);
+  assert.match(colorRendered, /\| \+ +\| +1 +\| personal +\| .* \| \u001b\[32m15\.05\.2026\u001b\[0m +\| \u001b\[32musable\u001b\[0m +\|/);
   assert.match(colorRendered, /\u001b\[33m30%/);
   assert.match(colorRendered, /\u001b\[32m85%/);
   assert.match(colorRendered, /\u001b\[1;95mpro\u001b\[0m/);
 });
 
-test("selection formatter renders paid date values and invalid metadata safely", async () => {
+test("selection formatter renders expiration values and invalid metadata safely", async () => {
   const { logger } = createTestLogger();
 
   const rendered = formatSelectionSummary({
@@ -181,6 +193,7 @@ test("selection formatter renders paid date values and invalid metadata safely",
           rankingPosition: null,
           snapshot: null,
           source: "unavailable",
+          expiredAt: { displayValue: null, isoValue: null, source: "missing" },
           paidAt: { displayValue: null, isoValue: null, source: "missing" },
         },
         {
@@ -200,6 +213,11 @@ test("selection formatter renders paid date values and invalid metadata safely",
           rankingPosition: null,
           snapshot: null,
           source: "unavailable",
+          expiredAt: {
+            displayValue: "20.04.2026",
+            isoValue: "not-a-date",
+            source: "active_until",
+          },
           paidAt: {
             displayValue: "20.04.2026",
             isoValue: "not-a-date",
@@ -220,6 +238,11 @@ test("selection formatter renders paid date values and invalid metadata safely",
             isoValue: "2026-04-20T00:00:00.000Z",
             source: "metadata.subscriptionAcquiredAt",
           },
+          expiredAt: {
+            displayValue: "20.04.2026",
+            isoValue: "2026-04-20T00:00:00.000Z",
+            source: "active_until",
+          },
           failureCategory: null,
           failureMessage: null,
           isDefault: false,
@@ -239,9 +262,77 @@ test("selection formatter renders paid date values and invalid metadata safely",
     },
   });
 
-  assert.match(rendered, /\| missing-date +\| acct-1 +\| - +\| - +\| not-probed +\|/);
-  assert.match(rendered, /\| bad-date +\| acct-2 +\| - +\| - +\| not-probed +\|/);
-  assert.match(rendered, /\| legacy +\| acct-3 +\| 20\.04\.2026 +\| - +\| not-probed +\|/);
+  assert.match(rendered, /\| +\| +\| missing-date +\| acct-1 +\| - +\| not-probed +\|/);
+  assert.match(rendered, /\| +\| +\| bad-date +\| acct-2 +\| - +\| not-probed +\|/);
+  assert.match(rendered, /\| +\| +\| legacy +\| acct-3 +\| 20\.04\.2026 +\| not-probed +\|/);
+});
+
+test("display-only selection keeps usage ranking when subscription expiration fails", async (t) => {
+  const tempRoot = await createTempDir("codexes-account-list-subscription-failure");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const setup = await createAccountListFixture(tempRoot);
+  const { events, logger } = createTestLogger();
+
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (isSubscriptionRequest(url)) {
+      return new Response("blocked", { status: 403 });
+    }
+
+    const accountId = extractAccountIdHeader(init);
+    return jsonResponse(
+      accountId === setup.work.id
+        ? {
+            rate_limit: {
+              allowed: true,
+              plan: "free",
+              primary_window: { used_percent: 99 },
+              secondary_window: { used_percent: 94 },
+            },
+          }
+        : {
+            rate_limit: {
+              allowed: true,
+              plan: "pro",
+              primary_window: { used_percent: 95 },
+              secondary_window: { used_percent: 93 },
+            },
+          },
+    );
+  });
+
+  const summary = await resolveSelectionSummary({
+    experimentalSelection: {
+      enabled: true,
+      probeTimeoutMs: 500,
+      cacheTtlMs: 60_000,
+      useAccountIdHeader: true,
+    },
+    fetchImpl: fetch,
+    logger,
+    mode: "display-only",
+    registry: createStubRegistry([setup.work, setup.personal]),
+    selectionCacheFilePath: setup.cacheFilePath,
+    strategy: "remaining-limit",
+  });
+  const rendered = formatSelectionSummary({
+    capabilities: {
+      stdoutIsTTY: false,
+      useColor: false,
+    },
+    logger,
+    renderVariant: "display-table",
+    summary,
+  });
+
+  assert.equal(summary.selectedAccount?.id, setup.personal.id);
+  assert.equal(summary.entries.find((entry) => entry.account.id === setup.personal.id)?.rankingPosition, 1);
+  assert.equal(summary.entries.find((entry) => entry.account.id === setup.work.id)?.rankingPosition, 2);
+  assert.match(rendered, /\| \+ +\| +1 +\| personal +\| .* \| - +\| usable +\| +5% +\| +7% +\| pro +\| fresh +\|/);
+  assert.match(rendered, /\| +\| +2 +\| work +\| .* \| - +\| usable +\| +1% +\| +6% +\| free +\| fresh +\|/);
+  assertEvent(events, "selection.subscription_expiration.http_error", "debug");
+  assert.equal(findEvent(events, "selection.experimental_fallback_mixed_probe_outcomes", "warn"), undefined);
+  assert.equal(findEvent(events, "selection.experimental_fallback_all_probes_failed", "warn"), undefined);
 });
 
 test("display-only selection summary explains mixed probe fallback without an execution winner", async (t) => {
@@ -251,7 +342,11 @@ test("display-only selection summary explains mixed probe fallback without an ex
   const setup = await createAccountListFixture(tempRoot);
   const { events, logger } = createTestLogger();
 
-  t.mock.method(globalThis, "fetch", async (_url, init) => {
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (isSubscriptionRequest(url)) {
+      return subscriptionResponseForAccount(setup, url);
+    }
+
     const accountId = extractAccountIdHeader(init);
     if (accountId === setup.work.id) {
       return jsonResponse({
@@ -296,8 +391,8 @@ test("display-only selection summary explains mixed probe fallback without an ex
   );
   assert.match(rendered, /Selected account: unavailable for execution\./);
   assert.match(rendered, /Execution note: Multiple accounts are configured but no default account is selected\./);
-  assert.match(rendered, /\| work +\| .* \| 04\.05\.2026 +\| - +\| usable +\| +3% +\| +8% +\| free +\| fresh +\|/);
-  assert.match(rendered, /\| personal +\| .* \| 05\.05\.2026 +\| - +\| probe-failed +\| +unknown +\| +unknown +\| - +\| fresh +\|/);
+  assert.match(rendered, /\| +\| +\| work +\| .* \| 04\.05\.2026 +\| usable +\| +3% +\| +8% +\| free +\| fresh +\|/);
+  assert.match(rendered, /\| +\| +\| personal +\| .* \| 15\.05\.2026 +\| probe-failed +\| +unknown +\| +unknown +\| - +\| fresh +\|/);
   assertEvent(events, "selection.display_only_missing_execution_account", "info");
 });
 
@@ -340,8 +435,8 @@ test("display-only selection summary explains all-probes-failed fallback without
     /Fallback: every account probe failed, so codexes could not establish a reliable execution winner\./,
   );
   assert.match(rendered, /Selected account: unavailable for execution\./);
-  assert.match(rendered, /\| work +\| .* \| 04\.05\.2026 +\| - +\| probe-failed +\| +unknown +\| +unknown +\| - +\| fresh +\|/);
-  assert.match(rendered, /\| personal +\| .* \| 05\.05\.2026 +\| - +\| probe-failed +\| +unknown +\| +unknown +\| - +\| fresh +\|/);
+  assert.match(rendered, /\| +\| +\| work +\| .* \| - +\| probe-failed +\| +unknown +\| +unknown +\| - +\| fresh +\|/);
+  assert.match(rendered, /\| +\| +\| personal +\| .* \| - +\| probe-failed +\| +unknown +\| +unknown +\| - +\| fresh +\|/);
   assertEvent(events, "selection.display_only_missing_execution_account", "info");
 });
 
@@ -571,6 +666,26 @@ function extractAccountIdHeader(init: RequestInit | undefined): string | null {
 
   const headers = new Headers(init.headers);
   return headers.get("OpenAI-Account-ID");
+}
+
+function isSubscriptionRequest(url: string | URL | Request): boolean {
+  return String(url).startsWith("https://chatgpt.com/backend-api/subscriptions");
+}
+
+function subscriptionResponseForAccount(
+  setup: {
+    personal: AccountRecord;
+    work: AccountRecord;
+  },
+  url: string | URL | Request,
+): Response {
+  const accountId = new URL(String(url)).searchParams.get("account_id");
+  return jsonResponse({
+    active_until:
+      accountId === setup.work.id
+        ? "2026-05-04T00:00:00.000Z"
+        : "2026-05-15T00:00:00.000Z",
+  });
 }
 
 function jsonResponse(value: unknown): Response {
