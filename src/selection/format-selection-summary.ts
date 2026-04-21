@@ -225,7 +225,7 @@ function formatSelectionTableRow(
     plan: entry.snapshot?.plan
       ? colorize(capabilities, "planValue", entry.snapshot.plan)
       : "-",
-    ranking: entry.rankingPosition !== null ? String(entry.rankingPosition) : "",
+    ranking: formatRankingCell(entry, capabilities),
     selected: entry.isSelected ? "+" : "",
     source: colorize(capabilities, "source", entry.source),
     status: colorize(capabilities, mapStatusTone(status), status),
@@ -235,6 +235,19 @@ function formatSelectionTableRow(
       formatPercent(entry.snapshot?.weeklyRemaining ?? null),
     ),
   };
+}
+
+function formatRankingCell(
+  entry: SelectionSummaryEntry,
+  capabilities: SummaryRenderCapabilities,
+): string {
+  if (entry.rankingPosition !== null) {
+    return String(entry.rankingPosition);
+  }
+
+  return entry.isDisabledForAutoSelection
+    ? colorize(capabilities, "error", "disabled")
+    : "";
 }
 
 function formatExpiredAt(

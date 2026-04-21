@@ -16,6 +16,11 @@ import { resolveAccountUsageSnapshots, type AccountUsageResolution } from "./usa
 import type { UsageProbeFailureCategory } from "./usage-client.js";
 import type { NormalizedUsageSnapshot } from "./usage-types.js";
 
+const AUTO_SELECTION_ALLOWED_PLANS = new Set(["plus", "go", "pro"]);
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const DISABLED_AUTO_SELECTION_BLOCKED_REASON =
+  "Remaining-limit selection did not resolve an eligible account because the fallback account is disabled by subscription expiration or plan.";
+
 export type SelectionEntrySource = "cache" | "fresh" | "unavailable";
 export type SelectionFallbackReason =
   | "experimental-config-missing"
@@ -38,6 +43,7 @@ export interface SelectionSummaryEntry {
   failureCategory: UsageProbeFailureCategory | null;
   failureMessage: string | null;
   isDefault: boolean;
+  isDisabledForAutoSelection: boolean;
   isEligibleForRanking: boolean;
   isSelected: boolean;
   rankingPosition: number | null;
@@ -258,20 +264,26 @@ async function buildExperimentalSummary(input: {
       registry: input.registry,
       strategy: input.strategy,
     });
+    const eligibleFallbackSelection = removeDisabledFallbackSelection({
+      expiredAtByAccountId: input.expiredAtByAccountId,
+      fallbackSelection,
+      now: new Date(),
+      probeResults: [],
+    });
 
     return {
       entries: createUnavailableEntries(
         input.accounts,
         input.defaultAccount,
-        fallbackSelection.selectedAccount,
+        eligibleFallbackSelection.selectedAccount,
         input.paidAtByAccountId,
         input.expiredAtByAccountId,
       ),
-      executionBlockedReason: fallbackSelection.executionBlockedReason,
+      executionBlockedReason: eligibleFallbackSelection.executionBlockedReason,
       fallbackReason: "experimental-config-missing",
       mode: input.mode,
-      selectedAccount: fallbackSelection.selectedAccount,
-      selectedBy: fallbackSelection.selectedBy,
+      selectedAccount: eligibleFallbackSelection.selectedAccount,
+      selectedBy: eligibleFallbackSelection.selectedBy,
       strategy: input.strategy,
     };
   }
@@ -310,34 +322,52 @@ async function buildExperimentalSummary(input: {
       registry: input.registry,
       strategy: input.strategy,
     });
+    const eligibleFallbackSelection = removeDisabledFallbackSelection({
+      expiredAtByAccountId: input.expiredAtByAccountId,
+      fallbackSelection,
+      now: new Date(),
+      probeResults,
+    });
     logExperimentalFallbackSelection(input.logger, {
       fallbackReason,
       mode: input.mode,
-      selectedAccount: fallbackSelection.selectedAccount,
-      selectedBy: fallbackSelection.selectedBy,
+      selectedAccount: eligibleFallbackSelection.selectedAccount,
+      selectedBy: eligibleFallbackSelection.selectedBy,
     });
 
     return {
       entries: createExperimentalEntries({
         defaultAccount: input.defaultAccount,
         probeResults,
-        selectedAccount: fallbackSelection.selectedAccount,
+        selectedAccount: eligibleFallbackSelection.selectedAccount,
         selectedCandidateIds: [],
         paidAtByAccountId: input.paidAtByAccountId,
         expiredAtByAccountId: input.expiredAtByAccountId,
       }),
-      executionBlockedReason: fallbackSelection.executionBlockedReason,
+      executionBlockedReason: eligibleFallbackSelection.executionBlockedReason,
       fallbackReason,
       mode: input.mode,
-      selectedAccount: fallbackSelection.selectedAccount,
-      selectedBy: fallbackSelection.selectedBy,
+      selectedAccount: eligibleFallbackSelection.selectedAccount,
+      selectedBy: eligibleFallbackSelection.selectedBy,
       strategy: input.strategy,
     };
   }
 
   const successfulProbes = probeResults.filter((entry) => entry.ok);
+  const now = new Date();
   const candidates = successfulProbes
-    .filter((entry) => entry.snapshot.status === "usable")
+    .filter((entry) => {
+      const expiredAt =
+        input.expiredAtByAccountId.get(entry.account.id) ?? emptyExpiration("summary-missing");
+      return (
+        entry.snapshot.status === "usable" &&
+        !isDisabledForAutoSelection({
+          expiredAt,
+          now,
+          snapshot: entry.snapshot,
+        })
+      );
+    })
     .sort((left, right) =>
       compareExperimentalCandidates({
         defaultAccountId: input.defaultAccount?.id ?? null,
@@ -397,27 +427,33 @@ async function buildExperimentalSummary(input: {
       registry: input.registry,
       strategy: input.strategy,
     });
+    const eligibleFallbackSelection = removeDisabledFallbackSelection({
+      expiredAtByAccountId: input.expiredAtByAccountId,
+      fallbackSelection,
+      now,
+      probeResults,
+    });
     logExperimentalFallbackSelection(input.logger, {
       fallbackReason,
       mode: input.mode,
-      selectedAccount: fallbackSelection.selectedAccount,
-      selectedBy: fallbackSelection.selectedBy,
+      selectedAccount: eligibleFallbackSelection.selectedAccount,
+      selectedBy: eligibleFallbackSelection.selectedBy,
     });
 
     return {
       entries: createExperimentalEntries({
         defaultAccount: input.defaultAccount,
         probeResults,
-        selectedAccount: fallbackSelection.selectedAccount,
+        selectedAccount: eligibleFallbackSelection.selectedAccount,
         selectedCandidateIds: [],
         paidAtByAccountId: input.paidAtByAccountId,
         expiredAtByAccountId: input.expiredAtByAccountId,
       }),
-      executionBlockedReason: fallbackSelection.executionBlockedReason,
+      executionBlockedReason: eligibleFallbackSelection.executionBlockedReason,
       fallbackReason,
       mode: input.mode,
-      selectedAccount: fallbackSelection.selectedAccount,
-      selectedBy: fallbackSelection.selectedBy,
+      selectedAccount: eligibleFallbackSelection.selectedAccount,
+      selectedBy: eligibleFallbackSelection.selectedBy,
       strategy: input.strategy,
     };
   }
@@ -582,23 +618,33 @@ function createUnavailableEntries(
   paidAtByAccountId: Map<string, AccountPaidAt>,
   expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>,
 ): SelectionSummaryEntry[] {
-  return accounts.map((account) => ({
-    account,
-    expiredAt: expiredAtByAccountId.get(account.id) ?? emptyExpiration("summary-missing"),
-    paidAt: paidAtByAccountId.get(account.id) ?? {
-      displayValue: null,
-      isoValue: null,
-      source: "summary-missing",
-    },
-    failureCategory: null,
-    failureMessage: null,
-    isDefault: account.id === defaultAccount?.id,
-    isEligibleForRanking: false,
-    isSelected: account.id === selectedAccount?.id,
-    rankingPosition: null,
-    snapshot: null,
-    source: "unavailable",
-  }));
+  const now = new Date();
+  return accounts.map((account) => {
+    const expiredAt = expiredAtByAccountId.get(account.id) ?? emptyExpiration("summary-missing");
+
+    return {
+      account,
+      expiredAt,
+      paidAt: paidAtByAccountId.get(account.id) ?? {
+        displayValue: null,
+        isoValue: null,
+        source: "summary-missing",
+      },
+      failureCategory: null,
+      failureMessage: null,
+      isDefault: account.id === defaultAccount?.id,
+      isDisabledForAutoSelection: isDisabledForAutoSelection({
+        expiredAt,
+        now,
+        snapshot: null,
+      }),
+      isEligibleForRanking: false,
+      isSelected: account.id === selectedAccount?.id,
+      rankingPosition: null,
+      snapshot: null,
+      source: "unavailable",
+    };
+  });
 }
 
 function createExperimentalEntries(input: {
@@ -609,23 +655,37 @@ function createExperimentalEntries(input: {
   paidAtByAccountId: Map<string, AccountPaidAt>;
   expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>;
 }): SelectionSummaryEntry[] {
-  return input.probeResults.map((entry) => ({
-    account: entry.account,
-    expiredAt: input.expiredAtByAccountId.get(entry.account.id) ?? emptyExpiration("summary-missing"),
-    paidAt: input.paidAtByAccountId.get(entry.account.id) ?? {
-      displayValue: null,
-      isoValue: null,
-      source: "summary-missing",
-    },
-    failureCategory: entry.ok ? null : entry.category,
-    failureMessage: entry.ok ? null : entry.message,
-    isDefault: entry.account.id === input.defaultAccount?.id,
-    isEligibleForRanking: entry.ok && entry.snapshot.status === "usable",
-    isSelected: entry.account.id === input.selectedAccount?.id,
-    rankingPosition: entry.ok ? resolveRankingPosition(input.selectedCandidateIds, entry.account.id) : null,
-    snapshot: entry.ok ? entry.snapshot : null,
-    source: entry.ok ? entry.source : "fresh",
-  }));
+  const now = new Date();
+  return input.probeResults.map((entry) => {
+    const expiredAt =
+      input.expiredAtByAccountId.get(entry.account.id) ?? emptyExpiration("summary-missing");
+    const snapshot = entry.ok ? entry.snapshot : null;
+    const isDisabledForAutoSelectionEntry = isDisabledForAutoSelection({
+      expiredAt,
+      now,
+      snapshot,
+    });
+
+    return {
+      account: entry.account,
+      expiredAt,
+      paidAt: input.paidAtByAccountId.get(entry.account.id) ?? {
+        displayValue: null,
+        isoValue: null,
+        source: "summary-missing",
+      },
+      failureCategory: entry.ok ? null : entry.category,
+      failureMessage: entry.ok ? null : entry.message,
+      isDefault: entry.account.id === input.defaultAccount?.id,
+      isDisabledForAutoSelection: isDisabledForAutoSelectionEntry,
+      isEligibleForRanking:
+        entry.ok && entry.snapshot.status === "usable" && !isDisabledForAutoSelectionEntry,
+      isSelected: entry.account.id === input.selectedAccount?.id,
+      rankingPosition: entry.ok ? resolveRankingPosition(input.selectedCandidateIds, entry.account.id) : null,
+      snapshot,
+      source: entry.ok ? entry.source : "fresh",
+    };
+  });
 }
 
 async function resolveExpirationMetadata(input: {
@@ -671,6 +731,39 @@ function emptyExpiration(source: string): AccountSubscriptionExpiration {
   };
 }
 
+function isDisabledForAutoSelection(input: {
+  expiredAt: AccountSubscriptionExpiration;
+  now: Date;
+  snapshot: NormalizedUsageSnapshot | null;
+}): boolean {
+  if (isExpiredForAutoSelection(input.expiredAt, input.now)) {
+    return true;
+  }
+
+  const plan = input.snapshot?.plan?.trim().toLowerCase();
+  return Boolean(plan && !AUTO_SELECTION_ALLOWED_PLANS.has(plan));
+}
+
+function isExpiredForAutoSelection(
+  expiredAt: AccountSubscriptionExpiration,
+  now: Date,
+): boolean {
+  if (!expiredAt.isoValue) {
+    return false;
+  }
+
+  const expirationDate = new Date(expiredAt.isoValue);
+  if (Number.isNaN(expirationDate.getTime())) {
+    return false;
+  }
+
+  return toDateOnlyTimestamp(expirationDate) <= toDateOnlyTimestamp(now);
+}
+
+function toDateOnlyTimestamp(value: Date): number {
+  return Date.UTC(value.getFullYear(), value.getMonth(), value.getDate()) / DAY_IN_MS;
+}
+
 function resolveRankingPosition(selectedCandidateIds: string[], accountId: string): number | null {
   const index = selectedCandidateIds.indexOf(accountId);
   if (index < 0) {
@@ -678,6 +771,41 @@ function resolveRankingPosition(selectedCandidateIds: string[], accountId: strin
   }
 
   return index + 1;
+}
+
+function removeDisabledFallbackSelection(input: {
+  expiredAtByAccountId: Map<string, AccountSubscriptionExpiration>;
+  fallbackSelection: {
+    executionBlockedReason: string | null;
+    selectedAccount: AccountRecord | null;
+    selectedBy: "manual-default" | "manual-default-fallback-single" | null;
+  };
+  now: Date;
+  probeResults: AccountUsageResolution[];
+}): {
+  executionBlockedReason: string | null;
+  selectedAccount: AccountRecord | null;
+  selectedBy: "manual-default" | "manual-default-fallback-single" | null;
+} {
+  const selectedAccount = input.fallbackSelection.selectedAccount;
+  if (!selectedAccount) {
+    return input.fallbackSelection;
+  }
+
+  const probeResult = input.probeResults.find((entry) => entry.account.id === selectedAccount.id);
+  const snapshot = probeResult?.ok ? probeResult.snapshot : null;
+  const expiredAt =
+    input.expiredAtByAccountId.get(selectedAccount.id) ?? emptyExpiration("summary-missing");
+
+  if (!isDisabledForAutoSelection({ expiredAt, now: input.now, snapshot })) {
+    return input.fallbackSelection;
+  }
+
+  return {
+    executionBlockedReason: DISABLED_AUTO_SELECTION_BLOCKED_REASON,
+    selectedAccount: null,
+    selectedBy: null,
+  };
 }
 
 function compareExperimentalCandidates(input: {
