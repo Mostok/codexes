@@ -37,12 +37,12 @@ test("runRootCommand skips account sync-back when the child codex process fails"
     [
       "import { mkdir, writeFile } from 'node:fs/promises';",
       "import path from 'node:path';",
-      "await writeFile(path.join(process.env.CODEX_HOME, 'auth.json'), '{\"last_refresh\":\"failed-child\"}\\n', 'utf8');",
+      "await writeFile(path.join(process.env.CODEX_HOME, 'auth.json'), '{\\\"last_refresh\\\":\\\"failed-child\\\"}\\\\n', 'utf8');",
       "await mkdir(path.join(process.env.CODEX_HOME, 'sessions'), { recursive: true });",
-      "await writeFile(path.join(process.env.CODEX_HOME, 'sessions', 'failed.json'), '{}\\n', 'utf8');",
+      "await writeFile(path.join(process.env.CODEX_HOME, 'sessions', 'failed.json'), '{}\\\\n', 'utf8');",
       "await mkdir(path.join(process.env.CODEX_HOME, 'trust'), { recursive: true });",
-      "await writeFile(path.join(process.env.CODEX_HOME, 'trust', 'failed.txt'), 'shared-trust\\n', 'utf8');",
-      "await writeFile(path.join(process.env.CODEX_HOME, 'mcp.json'), '{\"mcpServers\":{\"unsafe\":{\"command\":\"node\"}}}\\n', 'utf8');",
+      "await writeFile(path.join(process.env.CODEX_HOME, 'trust', 'failed.txt'), 'shared-trust\\\\n', 'utf8');",
+      "await writeFile(path.join(process.env.CODEX_HOME, 'mcp.json'), '{\\\"mcpServers\\\":{\\\"unsafe\\\":{\\\"command\\\":\\\"node\\\"}}}\\\\n', 'utf8');",
       "process.exit(7);",
       "",
     ].join("\n"),
@@ -50,7 +50,7 @@ test("runRootCommand skips account sync-back when the child codex process fails"
   );
   const codexBinaryPath = await createCodexShim({ binRoot, scriptPath: fakeCodexScript });
 
-  const { logger } = createTestLogger();
+  const { events, logger } = createTestLogger();
   const registry = createAccountRegistry({
     accountRoot,
     logger,
@@ -74,11 +74,6 @@ test("runRootCommand skips account sync-back when the child codex process fails"
     "utf8",
   );
 
-  const events: Array<{
-    details: Record<string, unknown> | undefined;
-    event: string;
-    level: "debug" | "info" | "warn" | "error";
-  }> = [];
   const context = createRootCommandContext({
     argv: ["chat"],
     codexBinaryPath,
@@ -103,11 +98,35 @@ test("runRootCommand skips account sync-back when the child codex process fails"
     ),
     null,
   );
+  assert.equal(await stat(path.join(sharedCodexHome, "sessions", "failed.json")).catch(() => null), null);
   assert.match(
     await readFile(path.join(sharedCodexHome, "trust", "failed.txt"), "utf8"),
     /shared-trust/,
   );
   assert.equal(await stat(path.join(sharedCodexHome, "mcp.json")).catch(() => null), null);
+
+  await writeFile(
+    fakeCodexScript,
+    [
+      "import { readFile, writeFile } from 'node:fs/promises';",
+      "import path from 'node:path';",
+      "const auth = await readFile(path.join(process.env.CODEX_HOME, 'auth.json'), 'utf8');",
+      "await writeFile(path.join(process.env.CODEX_HOME, 'observed-auth.txt'), auth, 'utf8');",
+      "process.exit(0);",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const secondExitCode = await runRootCommand(context);
+  assert.equal(secondExitCode, 0);
+  assert.match(
+    await readFile(
+      path.join(runtimePaths.accountStateDirectory, "codex-home", "observed-auth.txt"),
+      "utf8",
+    ),
+    /before-child/,
+  );
   assertEvent(events, "root.runtime_model.isolated_execution.shared_sync_back.complete", "info");
   assertEvent(events, "root.runtime_model.isolated_execution.sync_back_skipped", "warn");
   assert.equal(
@@ -228,28 +247,8 @@ test("runRootCommand allows concurrent isolated children on the same account and
   );
   assertEvent(events, "root.runtime_model.isolated_execution.child_run.start", "info");
   assertEvent(events, "root.runtime_model.isolated_execution.account_sync_back.start", "info");
-  const syncBackAccountLockIndex = events.findIndex(
-    (entry) =>
-      entry.event === "root.runtime_model.isolated_execution.account_lock_acquired" &&
-      entry.details?.purpose === "account-sync-back",
-  );
-  assert.notEqual(syncBackAccountLockIndex, -1);
-  const syncBackSharedLockIndex = events.findIndex(
-    (entry, index) =>
-      index > syncBackAccountLockIndex &&
-      entry.event === "root.shared_sync_lock.acquire.complete",
-  );
-  assert.notEqual(syncBackSharedLockIndex, -1);
-  const syncBackAccountReleaseIndex = events.findIndex(
-    (entry, index) =>
-      index > syncBackAccountLockIndex &&
-      entry.event === "root.runtime_model.isolated_execution.account_lock_releasing" &&
-      entry.details?.purpose === "account-sync-back",
-  );
-  assert.notEqual(syncBackAccountReleaseIndex, -1);
-  assert.ok(syncBackSharedLockIndex < syncBackAccountReleaseIndex);
   assert.equal(
-    events.some((entry) => entry.event === "root.account_sync_lock.acquire.timeout"),
+    events.some((entry) => entry.event.includes("lock")),
     false,
   );
 });

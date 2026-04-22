@@ -1,11 +1,14 @@
 import os from "node:os";
 import path from "node:path";
 import {
-  copyFile,
-  cp,
+  link,
+  lstat,
   mkdir,
   readFile,
+  readlink,
+  rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import type { Logger } from "../../logging/logger.js";
@@ -39,6 +42,7 @@ export async function initializeRuntimeEnvironment(input: {
 
   input.logger.info("runtime_init.start", {
     dataRoot: input.paths.dataRoot,
+    projectRoot: input.paths.projectRoot,
     sharedCodexHome: input.paths.sharedCodexHome,
     legacyCodexHome,
     firstRun,
@@ -50,7 +54,6 @@ export async function initializeRuntimeEnvironment(input: {
     input.paths.accountRoot,
     input.paths.runtimeRoot,
     path.join(input.paths.runtimeRoot, "backups"),
-    path.join(input.paths.runtimeRoot, "locks", "account"),
     input.paths.executionRoot,
     path.join(input.paths.runtimeRoot, "tmp"),
     path.dirname(input.paths.registryFile),
@@ -68,6 +71,7 @@ export async function initializeRuntimeEnvironment(input: {
   const configResult = await ensureSharedConfigToml({
     legacyCodexHome,
     logger: input.logger,
+    projectRoot: input.paths.projectRoot,
     sharedCodexHome: input.paths.sharedCodexHome,
   });
   createdFiles.push(...configResult.createdFiles);
@@ -135,46 +139,35 @@ export async function initializeRuntimeEnvironment(input: {
 async function ensureSharedConfigToml(input: {
   legacyCodexHome: string;
   logger: Logger;
+  projectRoot: string;
   sharedCodexHome: string;
 }): Promise<SharedArtifactResult> {
   const targetPath = path.join(input.sharedCodexHome, "config.toml");
   const sourcePath = path.join(input.legacyCodexHome, "config.toml");
 
-  if (await pathExists(targetPath)) {
-    const existingConfig = await readFile(targetPath, "utf8");
-    const existingMode = detectCredentialStoreMode(existingConfig);
-
-    input.logger.debug("runtime_init.config_exists", {
-      targetPath,
-      credentialStoreMode: existingMode,
-    });
-
-    if (existingMode === "missing") {
-      await writeFile(targetPath, pinFileCredentialStore(existingConfig), "utf8");
-      input.logger.info("runtime_init.config_file_mode_pinned", {
-        targetPath,
-      });
-    } else if (existingMode !== "file") {
-      input.logger.warn("runtime_init.config_mode_unsupported", {
-        targetPath,
-        credentialStoreMode: existingMode,
-      });
-    }
-
-    return emptyArtifactResult();
-  }
-
   if (await pathExists(sourcePath) && !samePath(sourcePath, targetPath)) {
-    const sourceConfig = await readFile(sourcePath, "utf8");
-    const pinnedConfig = pinFileCredentialStore(sourceConfig);
-    await writeFile(targetPath, pinnedConfig, "utf8");
-
-    input.logger.info("runtime_init.config_imported", {
+    const linkType = await ensureLiveLink({
+      isDirectory: false,
+      logger: input.logger,
       sourcePath,
       targetPath,
-      sourceCredentialStoreMode: detectCredentialStoreMode(sourceConfig),
-      targetCredentialStoreMode: detectCredentialStoreMode(pinnedConfig),
     });
+    const sourceCredentialStoreMode = detectCredentialStoreMode(await readFile(sourcePath, "utf8"));
+
+    input.logger.info("runtime_init.config_linked", {
+      linkType,
+      projectRoot: input.projectRoot,
+      sourceCredentialStoreMode,
+      sourcePath,
+      targetPath,
+    });
+
+    if (sourceCredentialStoreMode !== "file") {
+      input.logger.warn("runtime_init.config_mode_unsupported", {
+        targetPath: sourcePath,
+        credentialStoreMode: sourceCredentialStoreMode,
+      });
+    }
 
     return {
       copiedArtifacts: ["config.toml"],
@@ -214,14 +207,6 @@ async function ensureSharedFileCopy(input: {
   const targetPath = path.join(input.sharedCodexHome, input.artifactName);
   const sourcePath = path.join(input.sourceCodexHome, input.artifactName);
 
-  if (await pathExists(targetPath)) {
-    input.logger.debug("runtime_init.file_exists", {
-      artifactName: input.artifactName,
-      targetPath,
-    });
-    return emptyArtifactResult();
-  }
-
   if (!(await pathExists(sourcePath)) || samePath(sourcePath, targetPath)) {
     input.logger.debug("runtime_init.file_skip", {
       artifactName: input.artifactName,
@@ -241,9 +226,15 @@ async function ensureSharedFileCopy(input: {
     };
   }
 
-  await copyFile(sourcePath, targetPath);
-  input.logger.info("runtime_init.file_copied", {
+  const linkType = await ensureLiveLink({
+    isDirectory: false,
+    logger: input.logger,
+    sourcePath,
+    targetPath,
+  });
+  input.logger.info("runtime_init.file_linked", {
     artifactName: input.artifactName,
+    linkType,
     sourcePath,
     targetPath,
   });
@@ -264,14 +255,6 @@ async function ensureSharedDirectoryCopy(input: {
   const targetPath = path.join(input.sharedCodexHome, input.artifactName);
   const sourcePath = path.join(input.sourceCodexHome, input.artifactName);
 
-  if (await pathExists(targetPath)) {
-    input.logger.debug("runtime_init.directory_artifact_exists", {
-      artifactName: input.artifactName,
-      targetPath,
-    });
-    return emptyArtifactResult();
-  }
-
   if (!(await pathExists(sourcePath)) || samePath(sourcePath, targetPath)) {
     input.logger.debug("runtime_init.directory_artifact_skip", {
       artifactName: input.artifactName,
@@ -291,9 +274,15 @@ async function ensureSharedDirectoryCopy(input: {
     };
   }
 
-  await cp(sourcePath, targetPath, { recursive: true });
-  input.logger.info("runtime_init.directory_artifact_copied", {
+  const linkType = await ensureLiveLink({
+    isDirectory: true,
+    logger: input.logger,
+    sourcePath,
+    targetPath,
+  });
+  input.logger.info("runtime_init.directory_artifact_linked", {
     artifactName: input.artifactName,
+    linkType,
     sourcePath,
     targetPath,
   });
@@ -310,28 +299,64 @@ function detectCredentialStoreMode(rawConfig: string): string {
   return match?.[1]?.trim().toLowerCase() ?? "missing";
 }
 
-function pinFileCredentialStore(rawConfig: string): string {
-  if (/^\s*cli_auth_credentials_store\s*=\s*"file"/m.test(rawConfig)) {
-    return rawConfig;
-  }
-
-  if (/^\s*cli_auth_credentials_store\s*=\s*"[^"]+"/m.test(rawConfig)) {
-    return rawConfig.replace(
-      /^\s*cli_auth_credentials_store\s*=\s*"[^"]+"/m,
-      'cli_auth_credentials_store = "file"',
-    );
-  }
-
-  const trimmed = rawConfig.trim();
-  if (!trimmed) {
-    return 'cli_auth_credentials_store = "file"\n';
-  }
-
-  return ['cli_auth_credentials_store = "file"', "", trimmed, ""].join("\n");
-}
-
 function samePath(left: string, right: string): boolean {
   return path.resolve(left) === path.resolve(right);
+}
+
+async function ensureLiveLink(input: {
+  isDirectory: boolean;
+  logger: Logger;
+  sourcePath: string;
+  targetPath: string;
+}): Promise<"file" | "hardlink" | "junction"> {
+  const existingLinkTarget = await readlink(input.targetPath).catch(() => null);
+  if (
+    existingLinkTarget &&
+    path.resolve(path.dirname(input.targetPath), existingLinkTarget) === path.resolve(input.sourcePath)
+  ) {
+    return input.isDirectory ? "junction" : "file";
+  }
+
+  if (!input.isDirectory && (await isSameFile(input.sourcePath, input.targetPath))) {
+    input.logger.debug("runtime_init.file_hardlink_identity_valid", {
+      sourcePath: input.sourcePath,
+      targetPath: input.targetPath,
+    });
+    return "hardlink";
+  }
+
+  await rm(input.targetPath, { force: true, recursive: true }).catch(() => undefined);
+  await mkdir(path.dirname(input.targetPath), { recursive: true });
+
+  if (input.isDirectory) {
+    await symlink(input.sourcePath, input.targetPath, "junction");
+    return "junction";
+  }
+
+  try {
+    await symlink(input.sourcePath, input.targetPath, "file");
+    return "file";
+  } catch (error) {
+    input.logger.debug("runtime_init.file_symlink_fallback", {
+      sourcePath: input.sourcePath,
+      targetPath: input.targetPath,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    await link(input.sourcePath, input.targetPath);
+    return "hardlink";
+  }
+}
+
+async function isSameFile(sourcePath: string, targetPath: string): Promise<boolean> {
+  const [sourceStats, targetStats] = await Promise.all([
+    lstat(sourcePath).catch(() => null),
+    lstat(targetPath).catch(() => null),
+  ]);
+  if (!sourceStats || !targetStats) {
+    return false;
+  }
+
+  return sourceStats.dev === targetStats.dev && sourceStats.ino === targetStats.ino;
 }
 
 async function pathExists(targetPath: string): Promise<boolean> {

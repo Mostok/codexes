@@ -1,4 +1,16 @@
-import { copyFile, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  cp,
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readlink,
+  rm,
+  symlink,
+} from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AccountRecord } from "../accounts/account-registry.js";
@@ -54,12 +66,11 @@ export async function prepareExecutionWorkspace(input: {
   const sessionId = createExecutionSessionId();
   const runtimePaths = resolveAccountRuntimePaths(input.runtimeContract, input.account.id);
   const accountStateRoot = runtimePaths.accountStateDirectory;
-  const workspaceRoot = path.join(runtimePaths.runtimeExecutionDirectory, sessionId);
-  const codexHome = path.join(workspaceRoot, "codex-home");
+  const workspaceRoot = path.join(accountStateRoot, "codex-home");
+  const codexHome = workspaceRoot;
   const authSourcePath = path.join(accountStateRoot, "auth.json");
 
-  assertPathInsideRoot(workspaceRoot, input.runtimeContract.executionRoot, "executionWorkspace");
-  assertPathInsideRoot(codexHome, workspaceRoot, "executionCodexHome");
+  assertPathInsideRoot(workspaceRoot, accountStateRoot, "accountCodexHome");
   assertPathInsideRoot(accountStateRoot, input.runtimeContract.perAccountRoot, "accountStateRoot");
 
   input.logger.info("execution_workspace.prepare.start", {
@@ -70,6 +81,14 @@ export async function prepareExecutionWorkspace(input: {
     codexHome,
     accountStateRoot,
     sharedCodexHome: input.sharedCodexHome,
+  });
+  input.logger.debug("execution_workspace.account_home_resolved", {
+    accountId: input.account.id,
+    sessionId,
+    accountStateRoot,
+    codexHome,
+    sharedCodexHome: input.sharedCodexHome,
+    homeLayout: "stable-account-home-with-shared-links",
   });
 
   if (!(await pathExists(authSourcePath))) {
@@ -98,6 +117,7 @@ export async function prepareExecutionWorkspace(input: {
     sessionId,
     workspaceRoot,
     codexHome,
+    reuse: true,
   });
 
   return {
@@ -114,33 +134,11 @@ export async function cleanupExecutionWorkspace(input: {
   logger: Logger;
   workspace: ExecutionWorkspace;
 }): Promise<void> {
-  input.logger.debug("execution_workspace.cleanup.start", {
+  input.logger.debug("execution_workspace.cleanup.skipped_stable_account_home", {
     accountId: input.workspace.accountId,
     sessionId: input.workspace.sessionId,
     workspaceRoot: input.workspace.workspaceRoot,
-  });
-
-  assertPathInsideRoot(
-    input.workspace.workspaceRoot,
-    input.workspace.executionRoot,
-    "executionWorkspaceCleanup",
-  );
-
-  await rm(input.workspace.workspaceRoot, { force: true, recursive: true }).catch(
-    (error: unknown) => {
-      input.logger.warn("execution_workspace.cleanup.failed", {
-        accountId: input.workspace.accountId,
-        sessionId: input.workspace.sessionId,
-        workspaceRoot: input.workspace.workspaceRoot,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    },
-  );
-
-  input.logger.debug("execution_workspace.cleanup.complete", {
-    accountId: input.workspace.accountId,
-    sessionId: input.workspace.sessionId,
-    workspaceRoot: input.workspace.workspaceRoot,
+    reason: "account codex home is reused between terminals",
   });
 }
 
@@ -219,21 +217,10 @@ async function bootstrapCodexHome(input: {
     sharedCodexHome: input.sharedCodexHome,
   });
 
-  await ensurePinnedFileConfig({
+  await linkSharedCodexHomeEntries({
     codexHome: input.codexHome,
     logger: input.logger,
-    sharedCodexHome: input.sharedCodexHome,
-  });
-  await copySharedArtifactIfPresent({
-    artifactName: "mcp.json",
-    codexHome: input.codexHome,
-    logger: input.logger,
-    sharedCodexHome: input.sharedCodexHome,
-  });
-  await copySharedDirectoryIfPresent({
-    artifactName: "trust",
-    codexHome: input.codexHome,
-    logger: input.logger,
+    runtimeContract: input.runtimeContract,
     sharedCodexHome: input.sharedCodexHome,
   });
 
@@ -246,8 +233,6 @@ async function bootstrapCodexHome(input: {
       sourceCodexHome: input.accountStateRoot,
     });
   }
-
-  await mkdir(path.join(input.codexHome, "sessions"), { recursive: true });
 
   input.logger.info("workspace_bootstrap.complete", {
     accountId: input.accountId,
@@ -292,74 +277,155 @@ export async function copyAccountScopedAuthArtifacts(input: {
   });
 }
 
-async function ensurePinnedFileConfig(input: {
+async function linkSharedCodexHomeEntries(input: {
   codexHome: string;
   logger: Logger;
+  runtimeContract: RuntimeContract | null;
   sharedCodexHome: string;
 }): Promise<void> {
-  const sourceConfigPath = path.join(input.sharedCodexHome, "config.toml");
-  const targetConfigPath = path.join(input.codexHome, "config.toml");
-  const configContents = await readFile(sourceConfigPath, "utf8").catch(() => "");
-  const pinnedConfig = pinFileCredentialStore(configContents);
+  const sourceCodexHome = await resolveSharedCodexHomeLinkSource({
+    fallbackSharedCodexHome: input.sharedCodexHome,
+    logger: input.logger,
+  });
+  const entries = await readdir(sourceCodexHome, { withFileTypes: true }).catch(
+    (error: unknown) => {
+      input.logger.warn("login_workspace.shared_link.scan_failed", {
+        sharedCodexHome: sourceCodexHome,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    },
+  );
 
-  await writeFile(targetConfigPath, pinnedConfig, "utf8");
-  input.logger.info("login_workspace.config_prepared", {
-    sourceConfigPath,
-    targetConfigPath,
-    credentialStoreMode: "file",
+  input.logger.debug("login_workspace.shared_link.scan_complete", {
+    codexHome: input.codexHome,
+    sharedCodexHome: sourceCodexHome,
+    entryCount: entries.length,
+  });
+
+  for (const entry of entries) {
+    if (isAccountScopedEntry(entry.name, input.runtimeContract)) {
+      input.logger.debug("login_workspace.shared_link.skip_auth", {
+        entryName: entry.name,
+        reason: "entry is account-scoped",
+      });
+      continue;
+    }
+
+    await ensureSharedLink({
+      entryName: entry.name,
+      isDirectory: entry.isDirectory(),
+      logger: input.logger,
+      sourcePath: path.join(sourceCodexHome, entry.name),
+      targetPath: path.join(input.codexHome, entry.name),
+    });
+  }
+}
+
+async function resolveSharedCodexHomeLinkSource(input: {
+  fallbackSharedCodexHome: string;
+  logger: Logger;
+}): Promise<string> {
+  const legacyCodexHome = path.join(os.homedir(), ".codex");
+  if (await pathExists(legacyCodexHome)) {
+    input.logger.debug("login_workspace.shared_link.source_selected", {
+      selectedSource: legacyCodexHome,
+      fallbackSharedCodexHome: input.fallbackSharedCodexHome,
+      sourceKind: "legacy-codex-home",
+    });
+    return legacyCodexHome;
+  }
+
+  input.logger.warn("login_workspace.shared_link.source_fallback", {
+    selectedSource: input.fallbackSharedCodexHome,
+    fallbackSharedCodexHome: input.fallbackSharedCodexHome,
+    reason: "legacy-codex-home-missing",
+  });
+  return input.fallbackSharedCodexHome;
+}
+
+function isAccountScopedEntry(
+  entryName: string,
+  runtimeContract: RuntimeContract | null,
+): boolean {
+  if (!runtimeContract) {
+    return entryName === "auth.json" || entryName === "sessions";
+  }
+
+  return runtimeContract.fileRules.some((rule) => {
+    if (rule.classification !== "account") {
+      return false;
+    }
+
+    return rule.pathPattern === entryName || rule.pathPattern.startsWith(`${entryName}/`);
   });
 }
 
-async function copySharedArtifactIfPresent(input: {
-  artifactName: string;
-  codexHome: string;
+async function ensureSharedLink(input: {
+  entryName: string;
+  isDirectory: boolean;
   logger: Logger;
-  sharedCodexHome: string;
+  sourcePath: string;
+  targetPath: string;
 }): Promise<void> {
-  const sourcePath = path.join(input.sharedCodexHome, input.artifactName);
-  const targetPath = path.join(input.codexHome, input.artifactName);
-
-  if (!(await pathExists(sourcePath))) {
-    input.logger.debug("login_workspace.shared_file_skipped", {
-      artifactName: input.artifactName,
-      sourcePath,
-      reason: "missing",
+  const existingLinkTarget = await readlink(input.targetPath).catch(() => null);
+  if (existingLinkTarget && path.resolve(path.dirname(input.targetPath), existingLinkTarget) === input.sourcePath) {
+    input.logger.debug("login_workspace.shared_link.exists", {
+      entryName: input.entryName,
+      sourcePath: input.sourcePath,
+      targetPath: input.targetPath,
+    });
+    return;
+  }
+  if (!input.isDirectory && (await isSameFile(input.sourcePath, input.targetPath))) {
+    input.logger.debug("login_workspace.shared_link.exists", {
+      entryName: input.entryName,
+      sourcePath: input.sourcePath,
+      targetPath: input.targetPath,
+      linkType: "hardlink",
+      validation: "current-source-file-identity",
     });
     return;
   }
 
-  await copyFile(sourcePath, targetPath);
-  input.logger.debug("login_workspace.shared_file_copied", {
-    artifactName: input.artifactName,
-    sourcePath,
-    targetPath,
+  await rm(input.targetPath, { force: true, recursive: true }).catch(() => undefined);
+  await mkdir(path.dirname(input.targetPath), { recursive: true });
+  let linkType = process.platform === "win32" && input.isDirectory ? "junction" : input.isDirectory ? "dir" : "file";
+  if (input.isDirectory) {
+    await symlink(input.sourcePath, input.targetPath, linkType);
+  } else {
+    try {
+      await symlink(input.sourcePath, input.targetPath, "file");
+    } catch (error) {
+      linkType = "hardlink";
+      input.logger.debug("login_workspace.shared_link.file_symlink_fallback", {
+        entryName: input.entryName,
+        sourcePath: input.sourcePath,
+        targetPath: input.targetPath,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      await link(input.sourcePath, input.targetPath);
+    }
+  }
+  input.logger.debug("login_workspace.shared_link.created", {
+    entryName: input.entryName,
+    sourcePath: input.sourcePath,
+    targetPath: input.targetPath,
+    linkType,
   });
 }
 
-async function copySharedDirectoryIfPresent(input: {
-  artifactName: string;
-  codexHome: string;
-  logger: Logger;
-  sharedCodexHome: string;
-}): Promise<void> {
-  const sourcePath = path.join(input.sharedCodexHome, input.artifactName);
-  const targetPath = path.join(input.codexHome, input.artifactName);
-
-  if (!(await pathExists(sourcePath))) {
-    input.logger.debug("login_workspace.shared_directory_skipped", {
-      artifactName: input.artifactName,
-      sourcePath,
-      reason: "missing",
-    });
-    return;
-  }
-
-  await cp(sourcePath, targetPath, { recursive: true });
-  input.logger.debug("login_workspace.shared_directory_copied", {
-    artifactName: input.artifactName,
-    sourcePath,
-    targetPath,
-  });
+async function isSameFile(sourcePath: string, targetPath: string): Promise<boolean> {
+  const [sourceStats, targetStats] = await Promise.all([
+    lstat(sourcePath).catch(() => null),
+    lstat(targetPath).catch(() => null),
+  ]);
+  return Boolean(
+    sourceStats &&
+      targetStats &&
+      sourceStats.dev === targetStats.dev &&
+      sourceStats.ino === targetStats.ino,
+  );
 }
 
 async function copyRuleArtifacts(input: {
@@ -374,16 +440,19 @@ async function copyRuleArtifacts(input: {
     const targetDirectory = path.join(input.destinationRoot, relativeDirectory);
 
     if (!(await pathExists(sourceDirectory))) {
-      input.logger.debug("login_workspace.account_directory_skipped", {
+      await rm(targetDirectory, { force: true, recursive: true }).catch(() => undefined);
+      input.logger.debug("login_workspace.account_directory_cleared", {
         pathPattern: input.rule.pathPattern,
         sourceDirectory,
+        targetDirectory,
         reason: "missing",
       });
       return;
     }
 
+    await rm(targetDirectory, { force: true, recursive: true }).catch(() => undefined);
     await cp(sourceDirectory, targetDirectory, { recursive: true });
-    input.logger.debug("login_workspace.account_directory_copied", {
+    input.logger.debug("login_workspace.account_directory_refreshed", {
       pathPattern: input.rule.pathPattern,
       sourceDirectory,
       targetDirectory,
@@ -395,17 +464,20 @@ async function copyRuleArtifacts(input: {
   const targetFile = path.join(input.destinationRoot, input.rule.pathPattern);
 
   if (!(await pathExists(sourceFile))) {
-    input.logger.debug("login_workspace.account_file_skipped", {
+    await rm(targetFile, { force: true, recursive: true }).catch(() => undefined);
+    input.logger.debug("login_workspace.account_file_cleared", {
       pathPattern: input.rule.pathPattern,
       sourceFile,
+      targetFile,
       reason: "missing",
     });
     return;
   }
 
   await mkdir(path.dirname(targetFile), { recursive: true });
+  await rm(targetFile, { force: true, recursive: true }).catch(() => undefined);
   await copyFile(sourceFile, targetFile);
-  input.logger.debug("login_workspace.account_file_copied", {
+  input.logger.debug("login_workspace.account_file_refreshed", {
     pathPattern: input.rule.pathPattern,
     sourceFile,
     targetFile,
@@ -424,29 +496,9 @@ function resolveSanitizedRuleTarget(codexHome: string, rule: RuntimeFileRule): s
   return path.join(codexHome, rule.pathPattern);
 }
 
-function pinFileCredentialStore(rawConfig: string): string {
-  if (/^\s*cli_auth_credentials_store\s*=\s*"file"/m.test(rawConfig)) {
-    return rawConfig;
-  }
-
-  if (/^\s*cli_auth_credentials_store\s*=\s*"[^"]+"/m.test(rawConfig)) {
-    return rawConfig.replace(
-      /^\s*cli_auth_credentials_store\s*=\s*"[^"]+"/m,
-      'cli_auth_credentials_store = "file"',
-    );
-  }
-
-  const trimmed = rawConfig.trim();
-  if (!trimmed) {
-    return 'cli_auth_credentials_store = "file"\n';
-  }
-
-  return ['cli_auth_credentials_store = "file"', "", trimmed, ""].join("\n");
-}
-
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
-    await stat(targetPath);
+    await lstat(targetPath);
     return true;
   } catch (error) {
     if (

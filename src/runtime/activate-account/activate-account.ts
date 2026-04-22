@@ -318,18 +318,32 @@ async function syncRuntimeArtifact(input: {
   }
 
   await mkdir(path.dirname(targetPath), { recursive: true });
-  if (isDirectoryPattern(input.rule)) {
-    await mkdir(targetPath, { recursive: true });
-    await cp(sourcePath, targetPath, { force: true, recursive: true });
-    input.logger.info("account_sync.directory_merged", {
-      pathPattern: input.rule.pathPattern,
-      sourcePath,
-      targetPath,
-      policy: "merge-without-delete",
-    });
-  } else {
-    await rm(targetPath, { force: true, recursive: true }).catch(() => undefined);
-    await copyFile(sourcePath, targetPath);
+  try {
+    if (isDirectoryPattern(input.rule)) {
+      await mkdir(targetPath, { recursive: true });
+      await cp(sourcePath, targetPath, { force: true, recursive: true });
+      input.logger.info("account_sync.directory_merged", {
+        pathPattern: input.rule.pathPattern,
+        sourcePath,
+        targetPath,
+        policy: "merge-without-delete",
+      });
+    } else {
+      await rm(targetPath, { force: true, recursive: true }).catch(() => undefined);
+      await copyFile(sourcePath, targetPath);
+    }
+  } catch (error) {
+    if (isBestEffortSyncError(error)) {
+      input.logger.warn("account_sync.best_effort_skip", {
+        pathPattern: input.rule.pathPattern,
+        sourcePath,
+        targetPath,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    throw error;
   }
 
   input.logger.info("account_sync.updated", {
@@ -379,6 +393,14 @@ function isDirectoryPattern(rule: RuntimeFileRule): boolean {
 
 function normalizedPattern(pattern: string): string {
   return pattern.endsWith("/**") ? pattern.slice(0, -3) : pattern;
+}
+
+function isBestEffortSyncError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+
+  return error.code === "EBUSY" || error.code === "EPERM";
 }
 
 async function hasArtifactChanged(

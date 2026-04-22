@@ -2,7 +2,7 @@
 
 > Transparent multi-account wrapper for the real `codex` CLI.
 
-`codexes` keeps one shared Codex runtime for config, MCP wiring, and trust state while storing each account's auth material in its own profile. Before every wrapped launch it activates the selected profile, so you can switch accounts without rebuilding the rest of the runtime.
+`codexes` держит для каждого аккаунта стабильную `accounts/<account>/state/codex-home`, но не клонирует в неё всю home. При запуске выбранный account home переиспользуется: shared entries подключаются ссылками напрямую на основную `~/.codex`, а account-scoped `auth.json` и `sessions/` каждый раз заново подставляются из `accounts/<account>/state`. Изменения в основной `.codex/config.toml`, `mcp.json` и `trust/` становятся видны уже созданным account home без повторной инициализации.
 
 ## Quick Start
 
@@ -29,10 +29,12 @@ codexes --help
 
 ## Key Features
 
-- Shared `CODEX_HOME` for stable `config.toml`, `mcp.json`, and `trust/`
-- Per-account auth activation for `auth.json` and `sessions/`
-- Shared `trust/` sync-back even after unsuccessful child exits, so trusted project decisions persist
-- Runtime locking to avoid concurrent mutation of the shared Codex home
+- Стабильный per-account `CODEX_HOME`, который переиспользуется между терминалами одного аккаунта
+- Общие `config.toml`, `mcp.json`, `trust/` и другие shared Codex-файлы подключаются ссылками напрямую на основную `~/.codex`
+- `auth.json` и `sessions/` остаются account-scoped и не шарятся между аккаунтами
+- Изолированный account `auth.json` без клонирования всей Codex home
+- Shared `trust/` сохраняется даже после неуспешного завершения child-процесса
+- Нет runtime lock gate перед созданием терминала
 - Experimental account selection by remaining primary and secondary window percentages
 - Packaged npm distribution with smoke coverage for real installs
 
@@ -56,7 +58,7 @@ Before launch, `codexes` prints a compact English execution summary that include
 
 `codexes account list` now uses a dedicated diagnostic table with columns for label, account id, `Payed at`, flags, status, remaining percentages, plan, and source. Footer lines under the table still carry `Selected account`, `Fallback`, and `Execution note` diagnostics, so the command remains read-only and informative even when no execution winner exists. Wrapped execution commands remain strict and still use the compact summary contract before launch.
 
-For wrapped launches, `codexes` now keeps the caller's working directory and logs the resolved `sandbox` / `approval` policy in DEBUG output. If a `codex` child session exits with a non-zero code, the wrapper still syncs shared `trust/` changes back before skipping account-scoped sync.
+Для wrapped-запусков `codexes` сохраняет текущую рабочую директорию вызывающего терминала и пишет resolved `sandbox` / `approval` policy в DEBUG output. Runtime initialization также пишет `execution_workspace.account_home_resolved`, `login_workspace.shared_link.created`, `login_workspace.shared_link.exists`, `login_workspace.account_file_refreshed` и `login_workspace.account_directory_refreshed`, чтобы reuse account home и live links на основную `.codex` можно было диагностировать без ручного обхода файловой системы. Если child-сессия `codex` завершается с non-zero code, wrapper сохраняет shared linked artifacts только для `trust/**`, пропускает account sync-back и очищает account-scoped state из стабильного `codex-home`.
 
 ## Documentation
 

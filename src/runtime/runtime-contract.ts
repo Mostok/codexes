@@ -69,7 +69,7 @@ export function createRuntimeContract(input: {
         "sessions/**",
         "account",
         "if-changed",
-        "Session refresh artifacts are still treated as account-scoped until a real token-refresh probe proves otherwise.",
+        "Safe MVP keeps session state isolated per account until a dedicated probe proves cross-account sharing is safe.",
       ),
       createRule("cache/**", "ephemeral", "never", "Transient caches should be recreated instead of copied."),
       createRule("logs/**", "ephemeral", "never", "Runtime logs are diagnostic and should not sync back."),
@@ -120,19 +120,11 @@ export function createRuntimeContract(input: {
 export function resolveAccountRuntimePaths(contract: RuntimeContract, accountId: string) {
   assertSafeAccountId(accountId);
   const accountDirectory = path.join(contract.perAccountRoot, accountId);
-  const accountSyncLockDirectory = path.join(
-    contract.runtimeRoot,
-    "locks",
-    "account",
-    accountId,
-    "sync.lock",
-  );
   const runtimeBackupDirectory = path.join(contract.runtimeRoot, "backups", accountId);
   const runtimeExecutionDirectory = path.join(contract.executionRoot, accountId);
   const runtimeTempDirectory = path.join(contract.runtimeRoot, "tmp", accountId);
 
   assertPathInsideRoot(accountDirectory, contract.perAccountRoot, "accountDirectory");
-  assertPathInsideRoot(accountSyncLockDirectory, contract.runtimeRoot, "accountSyncLockDirectory");
   assertPathInsideRoot(runtimeBackupDirectory, contract.runtimeRoot, "runtimeBackupDirectory");
   assertPathInsideRoot(runtimeExecutionDirectory, contract.executionRoot, "runtimeExecutionDirectory");
   assertPathInsideRoot(runtimeTempDirectory, contract.runtimeRoot, "runtimeTempDirectory");
@@ -141,7 +133,6 @@ export function resolveAccountRuntimePaths(contract: RuntimeContract, accountId:
     accountDirectory,
     accountStateDirectory: path.join(accountDirectory, "state"),
     accountMetadataFile: path.join(accountDirectory, "account.json"),
-    accountSyncLockDirectory,
     runtimeBackupDirectory,
     runtimeExecutionDirectory,
     runtimeTempDirectory,

@@ -4,7 +4,7 @@
 
 ## Summary
 
-`codexes` wraps the real `codex` binary. It keeps one shared runtime home for stable CLI behavior and MCP continuity, then swaps in account-scoped auth state before every wrapped Codex launch.
+`codexes` wraps the real `codex` binary. Он держит одну shared Codex home для конфигов, MCP и общего контекста, а для каждого аккаунта создаёт стабильную account home со ссылками на shared home и отдельным `auth.json`.
 
 ## Installation
 
@@ -60,37 +60,49 @@ If an account profile becomes invalid, the safe repair flow is:
 
 ## Runtime Model
 
-The wrapper separates runtime files into four classes:
+Wrapper разделяет runtime files на такие классы:
 
-- Shared: `config.toml`, `mcp.json`, `trust/`
+- Shared: `config.toml`, `mcp.json`, `trust/` и остальные общие Codex artifacts
 - Account-scoped: `auth.json`, `sessions/`
 - Ephemeral: caches, logs, history, temp files
 - Protected: SQLite state and keyring-related artifacts
 
-Only account-scoped files are activated into the shared Codex home before launching the real `codex` process. Shared files stay stable across accounts, which keeps MCP configuration and trust state consistent. After each wrapped run, shared artifacts such as `trust/` and `mcp.json` are synced back from the isolated execution workspace. That shared sync also runs after non-zero child exits so trusted-project decisions are not lost when a session fails or is interrupted.
+Для wrapped-запуска `CODEX_HOME` указывает на `accounts/<account>/state/codex-home`. Эта папка переиспользуется при повторном открытии терминала для того же аккаунта. Внутри неё shared artifacts подключены ссылками напрямую на основную `~/.codex`; для файлов используется symlink с fallback на hardlink, для директорий на Windows используется junction. `auth.json` и `sessions/` остаются реальными account-scoped артефактами и каждый запуск обновляются из `accounts/<account>/state`. Полная копия Codex home больше не создаётся.
 
 ## MCP Continuity
 
-MCP continuity is preserved by design:
+MCP continuity сохраняется через ссылки:
 
-- `mcp.json` lives in the shared runtime
-- `trust/` lives in the shared runtime
-- `config.toml` is shared and pinned to `cli_auth_credentials_store = "file"`
+- `mcp.json` берётся из основной `~/.codex` и подключается в account home live-ссылкой
+- `trust/` берётся из основной `~/.codex` и подключается в account home live-ссылкой
+- `config.toml` берётся из основной `~/.codex` как есть; wrapper больше не держит snapshot и не переписывает файл при инициализации
 
-Switching accounts should not require rebuilding the MCP topology because the wrapper never replaces those shared artifacts during account activation.
+Switching accounts не требует rebuilding MCP topology: новые MCP и изменения `config.toml` из основной `.codex` видны уже созданным account home без копирования и повторной инициализации.
 
-## Concurrency Guarantees
+## Project Root And Trust Warnings
 
-`codexes` uses a runtime lock under the wrapper-owned runtime root before mutating the shared Codex home.
+The wrapped `codex` child always launches from the caller's current working directory. `codexes` records that active workspace as `projectRoot` during runtime initialization, but shared `config.toml` now stays linked to the main `~/.codex` without wrapper-side sanitizing.
 
 Current behavior:
 
-- one process acquires the lock and proceeds
-- other processes wait up to the configured timeout
-- stale locks are detected and cleared based on lock age
-- every successful run releases the lock on exit
+- project-local `.codex` hooks и trust-пути читаются ровно так, как они определены в основной `~/.codex/config.toml`
+- если в основной конфигурации остались stale absolute paths из другого репозитория, их нужно исправлять в самой `~/.codex/config.toml`
+- DEBUG logs по linked-home flow идут через `runtime_init.config_linked`, `runtime_init.file_linked`, `runtime_init.directory_artifact_linked` и `login_workspace.shared_link.*`
 
-If you see `runtime_lock.acquire.timeout`, inspect whether another wrapper process is still active before deleting any lock directory manually.
+If Codex warns that project-local config, hooks, or exec policies are disabled for a different repository, run the wrapper with `LOG_LEVEL=DEBUG` and verify which main `~/.codex` file is linked into the current account home.
+
+## Concurrency
+
+`codexes` больше не ставит runtime lock перед созданием терминала.
+
+Current behavior:
+
+- новый терминал создаётся без ожидания lock acquisition
+- несколько аккаунтов могут работать параллельно, потому что у каждого свой account home и свой `auth.json`
+- несколько терминалов одного аккаунта используют одну и ту же стабильную account home
+- DEBUG diagnostics для home layout: `execution_workspace.account_home_resolved`, `login_workspace.shared_link.created`, `login_workspace.shared_link.exists`, `login_workspace.account_file_refreshed`, `login_workspace.account_directory_refreshed`
+
+Событий вида `runtime_lock.acquire.timeout`, `account_sync_lock.acquire.timeout`, `lock acquisition` и `lock release` в нормальном запуске быть не должно.
 
 ## Selection Strategies
 
@@ -289,8 +301,11 @@ Useful events:
 - `root.fallback_announced`
 - `account_list.summary_rendered`
 - `account_list.fallback_announced`
-- `runtime_lock.acquire.timeout`
 - `account_activation.missing_auth`
+- `execution_workspace.account_home_resolved`
+- `login_workspace.shared_link.created`
+- `login_workspace.shared_link.exists`
+- `login_workspace.account_file_reused`
 - `spawn_codex.complete`
 
 ## Troubleshooting
@@ -321,17 +336,18 @@ Fix:
 2. Re-add the account through `codexes account add`.
 3. Re-select it with `codexes account use`.
 
-### Shared runtime lock timeout
+### Account home links are not visible
 
 Symptoms:
 
-- `runtime_lock.acquire.timeout`
+- `login_workspace.shared_link.scan_failed`
+- expected MCP changes from shared `.codex/config.toml` are not visible in an account home
 
 Fix:
 
-1. Confirm whether another `codexes` process is still running.
-2. Wait for the active process to exit.
-3. If the lock is stale, clear it only after inspection.
+1. Re-run with `LOG_LEVEL=DEBUG`.
+2. Check `execution_workspace.account_home_resolved` for the active `codexHome`.
+3. Check `login_workspace.shared_link.created` or `login_workspace.shared_link.exists` for `config.toml`, `mcp.json` and `trust/`.
 
 ### No default account selected
 

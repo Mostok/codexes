@@ -149,7 +149,7 @@ test("account activation fails fast when stored auth is missing", async (t) => {
   assertEvent(events, "account_activation.missing_auth", "error");
 });
 
-test("execution workspace sync merges same-account session directories without deleting sibling sessions", async (t) => {
+test("execution workspace account sync updates only account auth", async (t) => {
   const tempRoot = await createTempDir("codexes-runtime-activation-merge");
   t.after(async () => removeTempDir(tempRoot));
 
@@ -239,7 +239,7 @@ test("execution workspace sync merges same-account session directories without d
     await readFile(path.join(runtimePaths.accountStateDirectory, "auth.json"), "utf8"),
     /second/,
   );
-  assertEvent(events, "account_sync.directory_merged", "info");
+  assertEvent(events, "account_sync.updated", "info");
 });
 
 test("runtime path resolution rejects path traversal account ids", async (t) => {
