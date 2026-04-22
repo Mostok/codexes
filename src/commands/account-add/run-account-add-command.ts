@@ -8,7 +8,7 @@ import {
   resolveAccountRuntimePaths,
 } from "../../runtime/runtime-contract.js";
 import {
-  copyAccountScopedAuthArtifacts,
+  persistAccountAuthState,
   prepareLoginWorkspace,
   type LoginWorkspace,
 } from "../../runtime/login-workspace.js";
@@ -157,11 +157,10 @@ export async function runAccountAddCommand(
     try {
       const runtimePaths = resolveAccountRuntimePaths(runtimeContract, account.id);
       await mkdir(runtimePaths.accountDirectory, { recursive: true });
-      await copyAccountScopedAuthArtifacts({
+      await persistAccountAuthState({
         accountId: account.id,
         destinationRoot: runtimePaths.accountStateDirectory,
         logger,
-        runtimeContract,
         sourceCodexHome: workspace.codexHome,
       });
       await writeAccountMetadata({

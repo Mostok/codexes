@@ -4,7 +4,7 @@
 
 ## Summary
 
-`codexes` wraps the real `codex` binary. Он держит одну shared Codex home для конфигов, MCP и общего контекста, а для каждого аккаунта создаёт стабильную account home со ссылками на shared home и отдельным `auth.json`.
+`codexes` wraps the real `codex` binary. Он использует основную `~/.codex` как единственный shared source of truth, а для каждого аккаунта держит стабильную `accounts/<account>/state/codex-home`, состоящую из ссылок на shared home и отдельной ссылки `auth.json` на `accounts/<account>/state/auth.json`.
 
 ## Installation
 
@@ -62,12 +62,12 @@ If an account profile becomes invalid, the safe repair flow is:
 
 Wrapper разделяет runtime files на такие классы:
 
-- Shared: `config.toml`, `mcp.json`, `trust/` и остальные общие Codex artifacts
-- Account-scoped: `auth.json`, `sessions/`
-- Ephemeral: caches, logs, history, temp files
-- Protected: SQLite state and keyring-related artifacts
+- Shared: `config.toml`, `mcp.json`, `trust/`, `sessions/`, `history.jsonl`, sqlite state, caches и остальные общие Codex artifacts
+- Account-scoped: только `auth.json`
+- Ephemeral: временные файлы, которые можно пересоздать локально
+- Protected: `keyring/**` и прочие unsupported credential-store artifacts
 
-Для wrapped-запуска `CODEX_HOME` указывает на `accounts/<account>/state/codex-home`. Эта папка переиспользуется при повторном открытии терминала для того же аккаунта. Внутри неё shared artifacts подключены ссылками напрямую на основную `~/.codex`; для файлов используется symlink с fallback на hardlink, для директорий на Windows используется junction. `auth.json` и `sessions/` остаются реальными account-scoped артефактами и каждый запуск обновляются из `accounts/<account>/state`. Полная копия Codex home больше не создаётся.
+Для wrapped-запуска `CODEX_HOME` указывает на `accounts/<account>/state/codex-home`. Эта папка переиспользуется при повторном открытии терминала для того же аккаунта. Внутри неё shared artifacts подключены ссылками напрямую на основную `~/.codex`; для файлов используется `symlink` с fallback на `hardlink`, для директорий на Windows используется `junction`. `auth.json` всегда является прямой ссылкой на `accounts/<account>/state/auth.json`. Полная копия Codex home больше не создаётся, а каждый запуск делает reconcile: создаёт недостающие ссылки, чинит неправильные и удаляет stale entries, которых уже нет в shared source.
 
 ## MCP Continuity
 
@@ -87,7 +87,7 @@ Current behavior:
 
 - project-local `.codex` hooks и trust-пути читаются ровно так, как они определены в основной `~/.codex/config.toml`
 - если в основной конфигурации остались stale absolute paths из другого репозитория, их нужно исправлять в самой `~/.codex/config.toml`
-- DEBUG logs по linked-home flow идут через `runtime_init.config_linked`, `runtime_init.file_linked`, `runtime_init.directory_artifact_linked` и `login_workspace.shared_link.*`
+- DEBUG logs по linked-home flow идут через `runtime_init.path_model`, `workspace_reconcile.shared_entry_ready`, `workspace_reconcile.auth_entry_ready` и `workspace_reconcile.complete`
 
 If Codex warns that project-local config, hooks, or exec policies are disabled for a different repository, run the wrapper with `LOG_LEVEL=DEBUG` and verify which main `~/.codex` file is linked into the current account home.
 
@@ -98,9 +98,9 @@ If Codex warns that project-local config, hooks, or exec policies are disabled f
 Current behavior:
 
 - новый терминал создаётся без ожидания lock acquisition
-- несколько аккаунтов могут работать параллельно, потому что у каждого свой account home и свой `auth.json`
+- несколько аккаунтов могут работать параллельно, потому что у каждого свой `auth.json`, но shared `.codex` у них общий
 - несколько терминалов одного аккаунта используют одну и ту же стабильную account home
-- DEBUG diagnostics для home layout: `execution_workspace.account_home_resolved`, `login_workspace.shared_link.created`, `login_workspace.shared_link.exists`, `login_workspace.account_file_refreshed`, `login_workspace.account_directory_refreshed`
+- DEBUG diagnostics для home layout: `execution_workspace.account_home_resolved`, `workspace_reconcile.shared_entry_ready`, `workspace_reconcile.auth_entry_ready`, `workspace_reconcile.complete`
 
 Событий вида `runtime_lock.acquire.timeout`, `account_sync_lock.acquire.timeout`, `lock acquisition` и `lock release` в нормальном запуске быть не должно.
 
@@ -303,9 +303,9 @@ Useful events:
 - `account_list.fallback_announced`
 - `account_activation.missing_auth`
 - `execution_workspace.account_home_resolved`
-- `login_workspace.shared_link.created`
-- `login_workspace.shared_link.exists`
-- `login_workspace.account_file_reused`
+- `workspace_reconcile.shared_entry_ready`
+- `workspace_reconcile.auth_entry_ready`
+- `workspace_reconcile.complete`
 - `spawn_codex.complete`
 
 ## Troubleshooting
@@ -340,14 +340,14 @@ Fix:
 
 Symptoms:
 
-- `login_workspace.shared_link.scan_failed`
+- `workspace_reconcile.source_scan_failed`
 - expected MCP changes from shared `.codex/config.toml` are not visible in an account home
 
 Fix:
 
 1. Re-run with `LOG_LEVEL=DEBUG`.
 2. Check `execution_workspace.account_home_resolved` for the active `codexHome`.
-3. Check `login_workspace.shared_link.created` or `login_workspace.shared_link.exists` for `config.toml`, `mcp.json` and `trust/`.
+3. Check `workspace_reconcile.shared_entry_ready` for `config.toml`, `mcp.json`, `trust/` and `sessions/`.
 
 ### No default account selected
 
@@ -415,7 +415,7 @@ Fix:
 
 ### Repeated trust prompt for the same project
 
-If `codex` keeps asking `Do you trust the contents of this directory?` for a project you already trusted, verify that you are still launching through the same shared `CODEX_HOME` and let the wrapped session exit far enough for `codexes` to finish its shared sync. Recent versions also sync `trust/` back after non-zero child exits, so repeated prompts after interrupted sessions should stop once you rebuild and reinstall the updated wrapper.
+If `codex` keeps asking `Do you trust the contents of this directory?` for a project you already trusted, verify that you are still launching through the same shared `CODEX_HOME`. Recent versions no longer do delayed shared sync: `trust/` is linked directly to the main `~/.codex`, so repeated prompts usually mean the shared source itself is missing or the account home link tree needs reconcile diagnostics.
 
 ### Unexpected `read-only` mode
 

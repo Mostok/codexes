@@ -50,53 +50,53 @@ export function createRuntimeContract(input: {
       createRule(
         "mcp.json",
         "shared",
-        "if-changed",
-        "MCP topology is shared across accounts and should persist across isolated runs.",
+        "never",
+        "MCP topology lives directly in the shared Codex home and reaches account workspaces through links.",
       ),
       createRule(
         "trust/**",
         "shared",
-        "if-changed",
-        "Trust metadata is shared across accounts and should persist across isolated runs.",
+        "never",
+        "Trust metadata is shared live through directory links and should never require sync-back.",
       ),
       createRule(
         "auth.json",
         "account",
-        "if-changed",
-        "Windows probe evidence shows auth.json is sufficient for `codex login status`, so it belongs to the active account profile.",
+        "account-to-runtime-only",
+        "auth.json is the only account-routed artifact and must always resolve to accounts/<id>/state/auth.json.",
       ),
       createRule(
         "sessions/**",
-        "account",
-        "if-changed",
-        "Safe MVP keeps session state isolated per account until a dedicated probe proves cross-account sharing is safe.",
+        "shared",
+        "never",
+        "Session state is intentionally shared because every account workspace is just a linked projection of one Codex home.",
       ),
-      createRule("cache/**", "ephemeral", "never", "Transient caches should be recreated instead of copied."),
-      createRule("logs/**", "ephemeral", "never", "Runtime logs are diagnostic and should not sync back."),
-      createRule("history.jsonl", "ephemeral", "never", "Conversation history should stay local to each runtime session."),
-      createRule("models_cache.json", "ephemeral", "never", "Model cache data can be rebuilt and should not drive account switching."),
+      createRule("cache/**", "shared", "never", "Caches are part of the single shared Codex state."),
+      createRule("logs/**", "shared", "never", "Logs live in the shared Codex home and are visible through links."),
+      createRule("history.jsonl", "shared", "never", "Conversation history is shared intentionally across account workspaces."),
+      createRule("models_cache.json", "shared", "never", "Model cache should remain shared with the live Codex home."),
       createRule("tmp/**", "ephemeral", "never", "Temporary files should be discarded after each run."),
       createRule(
         "state_*.sqlite*",
-        "protected",
+        "shared",
         "never",
-        "Observed SQLite runtime state exists in the live Codex home and remains unproven for cross-account merge or sync-back.",
+        "SQLite runtime state is part of the shared Codex home and is consumed through links.",
       ),
       createRule(
         "logs_*.sqlite*",
-        "protected",
+        "shared",
         "never",
-        "SQLite-backed log databases should stay isolated until a dedicated write-heavy probe proves they are safe to discard or share.",
+        "SQLite-backed logs are part of the shared Codex state and should stay live-linked.",
       ),
       createRule("keyring/**", "protected", "never", "External credential stores are explicitly unsupported for MVP."),
     ],
     syncBackStrategy: {
       whenChildProcessSucceeds:
-        "Compare allowed account-classified files and sync only changed files back to the owning account profile.",
+        "No sync-back is required because shared files stay linked to the live Codex home and auth.json links directly to account state.",
       whenChildProcessFails:
-        "Restore pre-launch runtime state and avoid syncing ambiguous mutations unless the failure is known-safe.",
+        "Keep the linked workspace in place; the next reconcile pass repairs stale links without copying runtime state.",
       compareStrategy:
-        "Use file existence, modified time, and content hash checks before any sync-back write.",
+        "Reconcile desired links on workspace preparation and replace stale or incorrect entries in place.",
     },
   };
 
@@ -107,6 +107,9 @@ export function createRuntimeContract(input: {
     perAccountRoot: contract.perAccountRoot,
     credentialStoreMode: contract.credentialStoreMode,
     supported: contract.supported,
+    accountScopedArtifacts: contract.fileRules
+      .filter((rule) => rule.classification === "account")
+      .map((rule) => rule.pathPattern),
   });
 
   input.logger.debug("runtime.file_rules", {

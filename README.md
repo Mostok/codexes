@@ -2,7 +2,7 @@
 
 > Transparent multi-account wrapper for the real `codex` CLI.
 
-`codexes` держит для каждого аккаунта стабильную `accounts/<account>/state/codex-home`, но не клонирует в неё всю home. При запуске выбранный account home переиспользуется: shared entries подключаются ссылками напрямую на основную `~/.codex`, а account-scoped `auth.json` и `sessions/` каждый раз заново подставляются из `accounts/<account>/state`. Изменения в основной `.codex/config.toml`, `mcp.json` и `trust/` становятся видны уже созданным account home без повторной инициализации.
+`codexes` держит для каждого аккаунта стабильную `accounts/<account>/state/codex-home`, но не клонирует в неё всю home. При запуске выбранный account home переиспользуется: все shared entries подключаются ссылками напрямую на основную `~/.codex`, а единственный account-scoped artifact `auth.json` всегда ссылается на `accounts/<account>/state/auth.json`. Изменения в основной `.codex/config.toml`, `mcp.json`, `trust/`, `sessions/`, sqlite state и history становятся видны уже созданным account home без повторной инициализации.
 
 ## Quick Start
 
@@ -30,10 +30,10 @@ codexes --help
 ## Key Features
 
 - Стабильный per-account `CODEX_HOME`, который переиспользуется между терминалами одного аккаунта
-- Общие `config.toml`, `mcp.json`, `trust/` и другие shared Codex-файлы подключаются ссылками напрямую на основную `~/.codex`
-- `auth.json` и `sessions/` остаются account-scoped и не шарятся между аккаунтами
-- Изолированный account `auth.json` без клонирования всей Codex home
-- Shared `trust/` сохраняется даже после неуспешного завершения child-процесса
+- Общие `config.toml`, `mcp.json`, `trust/`, `sessions/`, history и sqlite state подключаются ссылками напрямую на основную `~/.codex`
+- Только `auth.json` остаётся account-scoped и не шарится между аккаунтами
+- `accounts/<account>/state/codex-home` переиспользуется между терминалами одного аккаунта и каждый запуск reconcile-ится
+- Для директорий на Windows используются `junction`, для файлов сначала `symlink`, затем fallback на `hardlink`
 - Нет runtime lock gate перед созданием терминала
 - Experimental account selection by remaining primary and secondary window percentages
 - Packaged npm distribution with smoke coverage for real installs
@@ -58,7 +58,7 @@ Before launch, `codexes` prints a compact English execution summary that include
 
 `codexes account list` now uses a dedicated diagnostic table with columns for label, account id, `Payed at`, flags, status, remaining percentages, plan, and source. Footer lines under the table still carry `Selected account`, `Fallback`, and `Execution note` diagnostics, so the command remains read-only and informative even when no execution winner exists. Wrapped execution commands remain strict and still use the compact summary contract before launch.
 
-Для wrapped-запусков `codexes` сохраняет текущую рабочую директорию вызывающего терминала и пишет resolved `sandbox` / `approval` policy в DEBUG output. Runtime initialization также пишет `execution_workspace.account_home_resolved`, `login_workspace.shared_link.created`, `login_workspace.shared_link.exists`, `login_workspace.account_file_refreshed` и `login_workspace.account_directory_refreshed`, чтобы reuse account home и live links на основную `.codex` можно было диагностировать без ручного обхода файловой системы. Если child-сессия `codex` завершается с non-zero code, wrapper сохраняет shared linked artifacts только для `trust/**`, пропускает account sync-back и очищает account-scoped state из стабильного `codex-home`.
+Для wrapped-запусков `codexes` сохраняет текущую рабочую директорию вызывающего терминала и пишет resolved `sandbox` / `approval` policy в DEBUG output. Runtime initialization и reconcile account home также пишут `runtime_init.path_model`, `execution_workspace.account_home_resolved`, `workspace_reconcile.shared_entry_ready`, `workspace_reconcile.auth_entry_ready` и `workspace_reconcile.complete`, чтобы link-tree и repair stale entries можно было диагностировать без ручного обхода файловой системы. Отдельного sync-back после child-процесса больше нет: shared state живёт в основной `.codex`, а `auth.json` уже является прямой ссылкой на account state.
 
 ## Documentation
 

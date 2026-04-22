@@ -117,8 +117,8 @@ test("CLI passes unknown args and piped stdin through a single configured accoun
   assert.equal(childOutput.stdin, "stdin-payload");
   assert.notEqual(childOutput.codexHome, sharedCodexHome);
   assert.match(
-    path.relative(path.join(dataRoot, "runtime", "executions"), childOutput.codexHome),
-    /^.+[\\/]codex-home$/,
+    path.relative(path.join(dataRoot, "accounts"), childOutput.codexHome),
+    /^[^\\/]+[\\/]state[\\/]codex-home$/,
   );
 
   const syncedAuth = JSON.parse(

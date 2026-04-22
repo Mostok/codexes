@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import type { AccountRecord } from "../src/accounts/account-registry.js";
@@ -10,6 +10,7 @@ import {
   syncExecutionWorkspaceBackToSharedHome,
   syncSharedRuntimeBackToAccount,
 } from "../src/runtime/activate-account/activate-account.js";
+import { prepareExecutionWorkspace } from "../src/runtime/login-workspace.js";
 import { createRuntimeContract, resolveAccountRuntimePaths } from "../src/runtime/runtime-contract.js";
 import {
   assertEvent,
@@ -18,7 +19,7 @@ import {
   removeTempDir,
 } from "./test-helpers.js";
 
-test("account activation swaps runtime auth, syncs refreshed state, and restores backups", async (t) => {
+test("account activation swaps only runtime auth, syncs refreshed auth state, and restores backups", async (t) => {
   const tempRoot = await createTempDir("codexes-runtime-activation");
   t.after(async () => removeTempDir(tempRoot));
 
@@ -50,11 +51,6 @@ test("account activation swaps runtime auth, syncs refreshed state, and restores
     "utf8",
   );
   await writeFile(
-    path.join(runtimePaths.accountStateDirectory, "sessions", "active.json"),
-    '{"session":"account"}\n',
-    "utf8",
-  );
-  await writeFile(
     path.join(contract.sharedCodexHome, "auth.json"),
     '{"tokens":{"account_id":"shared"},"last_refresh":"shared"}\n',
     "utf8",
@@ -72,8 +68,11 @@ test("account activation swaps runtime auth, syncs refreshed state, and restores
     sharedCodexHome: contract.sharedCodexHome,
   });
 
-  const activeAuth = await readFile(path.join(contract.sharedCodexHome, "auth.json"), "utf8");
-  assert.match(activeAuth, /"work"/);
+  assert.match(await readFile(path.join(contract.sharedCodexHome, "auth.json"), "utf8"), /"work"/);
+  assert.match(
+    await readFile(path.join(contract.sharedCodexHome, "sessions", "active.json"), "utf8"),
+    /shared/,
+  );
 
   await writeFile(
     path.join(contract.sharedCodexHome, "auth.json"),
@@ -86,11 +85,10 @@ test("account activation swaps runtime auth, syncs refreshed state, and restores
     session,
   });
 
-  const syncedAuth = await readFile(
-    path.join(runtimePaths.accountStateDirectory, "auth.json"),
-    "utf8",
+  assert.match(
+    await readFile(path.join(runtimePaths.accountStateDirectory, "auth.json"), "utf8"),
+    /"refreshed"/,
   );
-  assert.match(syncedAuth, /"refreshed"/);
 
   await writeFile(
     path.join(contract.sharedCodexHome, "auth.json"),
@@ -105,8 +103,7 @@ test("account activation swaps runtime auth, syncs refreshed state, and restores
     sharedCodexHome: contract.sharedCodexHome,
   });
 
-  const restoredAuth = await readFile(path.join(contract.sharedCodexHome, "auth.json"), "utf8");
-  assert.match(restoredAuth, /"shared"/);
+  assert.match(await readFile(path.join(contract.sharedCodexHome, "auth.json"), "utf8"), /"shared"/);
 
   assertEvent(events, "account_activation.complete", "info");
   assertEvent(events, "account_sync.updated", "info");
@@ -149,8 +146,8 @@ test("account activation fails fast when stored auth is missing", async (t) => {
   assertEvent(events, "account_activation.missing_auth", "error");
 });
 
-test("execution workspace account sync updates only account auth", async (t) => {
-  const tempRoot = await createTempDir("codexes-runtime-activation-merge");
+test("prepareExecutionWorkspace reconciles direct auth and shared links inside stable account codex-home", async (t) => {
+  const tempRoot = await createTempDir("codexes-runtime-linked-home");
   t.after(async () => removeTempDir(tempRoot));
 
   const { events, logger } = createTestLogger();
@@ -161,85 +158,53 @@ test("execution workspace account sync updates only account auth", async (t) => 
     runtimeRoot: path.join(tempRoot, "runtime"),
     sharedCodexHome: path.join(tempRoot, "shared-home"),
   });
-
   const account: AccountRecord = {
-    id: "acct-merge",
-    label: "merge",
-    authDirectory: path.join(tempRoot, "accounts", "acct-merge"),
+    id: "acct-linked",
+    label: "linked",
+    authDirectory: path.join(tempRoot, "accounts", "acct-linked"),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     lastUsedAt: null,
   };
   const runtimePaths = resolveAccountRuntimePaths(contract, account.id);
-  const firstCodexHome = path.join(tempRoot, "workspaces", "first", "codex-home");
-  const secondCodexHome = path.join(tempRoot, "workspaces", "second", "codex-home");
+  const staleFile = path.join(runtimePaths.accountStateDirectory, "codex-home", "stale.txt");
 
-  await mkdir(path.join(runtimePaths.accountStateDirectory, "sessions"), { recursive: true });
+  await mkdir(path.join(contract.sharedCodexHome, "trust"), { recursive: true });
+  await writeFile(path.join(contract.sharedCodexHome, "config.toml"), 'model = "gpt-5"\n', "utf8");
+  await writeFile(path.join(contract.sharedCodexHome, "trust", "shared.txt"), "shared\n", "utf8");
+  await mkdir(path.dirname(staleFile), { recursive: true });
+  await writeFile(staleFile, "stale\n", "utf8");
+  await mkdir(runtimePaths.accountStateDirectory, { recursive: true });
   await writeFile(
-    path.join(runtimePaths.accountStateDirectory, "sessions", "before.json"),
-    '{"session":"before"}\n',
+    path.join(runtimePaths.accountStateDirectory, "auth.json"),
+    '{"last_refresh":"account-state"}\n',
     "utf8",
   );
 
-  await mkdir(path.join(firstCodexHome, "sessions"), { recursive: true });
-  await mkdir(path.join(secondCodexHome, "sessions"), { recursive: true });
-  await writeFile(path.join(firstCodexHome, "auth.json"), '{"last_refresh":"first"}\n', "utf8");
-  await writeFile(path.join(secondCodexHome, "auth.json"), '{"last_refresh":"second"}\n', "utf8");
-  await writeFile(
-    path.join(firstCodexHome, "sessions", "first.json"),
-    '{"session":"first"}\n',
-    "utf8",
-  );
-  await writeFile(
-    path.join(secondCodexHome, "sessions", "second.json"),
-    '{"session":"second"}\n',
-    "utf8",
-  );
-
-  await syncExecutionWorkspaceBackToAccount({
+  const workspace = await prepareExecutionWorkspace({
     account,
     logger,
     runtimeContract: contract,
-    workspace: {
-      accountId: account.id,
-      accountStateRoot: runtimePaths.accountStateDirectory,
-      codexHome: firstCodexHome,
-      executionRoot: contract.executionRoot,
-      sessionId: "first",
-      workspaceRoot: path.dirname(firstCodexHome),
-    },
-  });
-  await syncExecutionWorkspaceBackToAccount({
-    account,
-    logger,
-    runtimeContract: contract,
-    workspace: {
-      accountId: account.id,
-      accountStateRoot: runtimePaths.accountStateDirectory,
-      codexHome: secondCodexHome,
-      executionRoot: contract.executionRoot,
-      sessionId: "second",
-      workspaceRoot: path.dirname(secondCodexHome),
-    },
+    sharedCodexHome: contract.sharedCodexHome,
   });
 
-  assert.match(
-    await readFile(path.join(runtimePaths.accountStateDirectory, "sessions", "before.json"), "utf8"),
-    /before/,
-  );
-  assert.match(
-    await readFile(path.join(runtimePaths.accountStateDirectory, "sessions", "first.json"), "utf8"),
-    /first/,
-  );
-  assert.match(
-    await readFile(path.join(runtimePaths.accountStateDirectory, "sessions", "second.json"), "utf8"),
-    /second/,
-  );
+  assert.equal(workspace.codexHome, path.join(runtimePaths.accountStateDirectory, "codex-home"));
+  assert.equal(await stat(staleFile).catch(() => null), null);
+  assert.match(await readFile(path.join(workspace.codexHome, "auth.json"), "utf8"), /account-state/);
+  assert.match(await readFile(path.join(workspace.codexHome, "config.toml"), "utf8"), /gpt-5/);
+  assert.match(await readFile(path.join(workspace.codexHome, "trust", "shared.txt"), "utf8"), /shared/);
+
+  await writeFile(path.join(workspace.codexHome, "auth.json"), '{"last_refresh":"updated-via-link"}\n', "utf8");
   assert.match(
     await readFile(path.join(runtimePaths.accountStateDirectory, "auth.json"), "utf8"),
-    /second/,
+    /updated-via-link/,
   );
-  assertEvent(events, "account_sync.updated", "info");
+
+  await writeFile(path.join(workspace.codexHome, "sessions", "live.json"), '{"session":"live"}\n', "utf8");
+  assert.match(await readFile(path.join(contract.sharedCodexHome, "sessions", "live.json"), "utf8"), /live/);
+
+  assertEvent(events, "workspace_reconcile.auth_entry_ready", "info");
+  assertEvent(events, "workspace_reconcile.complete", "info");
 });
 
 test("runtime path resolution rejects path traversal account ids", async (t) => {
@@ -261,8 +226,8 @@ test("runtime path resolution rejects path traversal account ids", async (t) => 
   );
 });
 
-test("execution workspace sync persists shared artifacts back to shared home", async (t) => {
-  const tempRoot = await createTempDir("codexes-runtime-activation-shared-sync");
+test("execution workspace sync helpers become no-ops in the direct-link model", async (t) => {
+  const tempRoot = await createTempDir("codexes-runtime-direct-link-noop");
   t.after(async () => removeTempDir(tempRoot));
 
   const { events, logger } = createTestLogger();
@@ -275,30 +240,49 @@ test("execution workspace sync persists shared artifacts back to shared home", a
   });
 
   const workspaceCodexHome = path.join(tempRoot, "workspace", "codex-home");
-  await mkdir(path.join(contract.sharedCodexHome, "trust"), { recursive: true });
-  await writeFile(path.join(contract.sharedCodexHome, "mcp.json"), '{"version":"before"}\n', "utf8");
-  await writeFile(path.join(contract.sharedCodexHome, "trust", "old.txt"), "before\n", "utf8");
+  const accountStateRoot = path.join(tempRoot, "accounts", "acct-noop", "state");
+  await mkdir(path.join(workspaceCodexHome, "sessions"), { recursive: true });
+  await mkdir(accountStateRoot, { recursive: true });
+  await mkdir(contract.sharedCodexHome, { recursive: true });
+  await writeFile(path.join(workspaceCodexHome, "auth.json"), '{"last_refresh":"workspace"}\n', "utf8");
+  await writeFile(path.join(workspaceCodexHome, "sessions", "session.json"), '{"session":"workspace"}\n', "utf8");
 
-  await mkdir(path.join(workspaceCodexHome, "trust"), { recursive: true });
-  await writeFile(path.join(workspaceCodexHome, "mcp.json"), '{"version":"after"}\n', "utf8");
-  await writeFile(path.join(workspaceCodexHome, "trust", "new.txt"), "after\n", "utf8");
-
+  await syncExecutionWorkspaceBackToAccount({
+    account: {
+      id: "acct-noop",
+      label: "noop",
+      authDirectory: path.join(tempRoot, "accounts", "acct-noop"),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastUsedAt: null,
+    },
+    logger,
+    runtimeContract: contract,
+    workspace: {
+      accountId: "acct-noop",
+      accountStateRoot,
+      codexHome: workspaceCodexHome,
+      executionRoot: contract.executionRoot,
+      sessionId: "noop",
+      workspaceRoot: path.dirname(workspaceCodexHome),
+    },
+  });
   await syncExecutionWorkspaceBackToSharedHome({
     logger,
     runtimeContract: contract,
     sharedCodexHome: contract.sharedCodexHome,
     workspace: {
-      accountId: "acct-shared",
-      accountStateRoot: path.join(tempRoot, "accounts", "acct-shared", "state"),
+      accountId: "acct-noop",
+      accountStateRoot,
       codexHome: workspaceCodexHome,
       executionRoot: contract.executionRoot,
-      sessionId: "session-shared",
+      sessionId: "noop",
       workspaceRoot: path.dirname(workspaceCodexHome),
     },
   });
 
-  assert.match(await readFile(path.join(contract.sharedCodexHome, "mcp.json"), "utf8"), /after/);
-  assert.match(await readFile(path.join(contract.sharedCodexHome, "trust", "old.txt"), "utf8"), /before/);
-  assert.match(await readFile(path.join(contract.sharedCodexHome, "trust", "new.txt"), "utf8"), /after/);
+  assert.equal(await stat(path.join(accountStateRoot, "auth.json")).catch(() => null), null);
+  assert.equal(await stat(path.join(contract.sharedCodexHome, "sessions", "session.json")).catch(() => null), null);
+  assertEvent(events, "execution_workspace_sync.complete", "info");
   assertEvent(events, "execution_workspace_shared_sync.complete", "info");
 });

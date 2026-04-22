@@ -15,7 +15,7 @@ import {
   waitForPath,
 } from "./test-helpers.js";
 
-test("runRootCommand skips account sync-back when the child codex process fails", async (t) => {
+test("runRootCommand keeps direct links active when the child codex process fails", async (t) => {
   const tempRoot = await createTempDir("codexes-root-failed-child");
   t.after(async () => removeTempDir(tempRoot));
 
@@ -32,6 +32,7 @@ test("runRootCommand skips account sync-back when the child codex process fails"
   await mkdir(accountRoot, { recursive: true });
   await mkdir(runtimeRoot, { recursive: true });
   await writeFile(path.join(sharedCodexHome, "config.toml"), 'cli_auth_credentials_store = "file"\n', "utf8");
+  await writeFile(path.join(sharedCodexHome, "mcp.json"), '{"mcpServers":{"safe":{"command":"node"}}}\n', "utf8");
   await writeFile(
     fakeCodexScript,
     [
@@ -90,20 +91,17 @@ test("runRootCommand skips account sync-back when the child codex process fails"
   assert.equal(exitCode, 7);
   assert.match(
     await readFile(path.join(runtimePaths.accountStateDirectory, "auth.json"), "utf8"),
-    /before-child/,
+    /failed-child/,
   );
-  assert.equal(
-    await stat(path.join(runtimePaths.accountStateDirectory, "sessions", "failed.json")).catch(
-      () => null,
-    ),
-    null,
+  assert.match(
+    await readFile(path.join(sharedCodexHome, "sessions", "failed.json"), "utf8"),
+    /}/,
   );
-  assert.equal(await stat(path.join(sharedCodexHome, "sessions", "failed.json")).catch(() => null), null);
   assert.match(
     await readFile(path.join(sharedCodexHome, "trust", "failed.txt"), "utf8"),
     /shared-trust/,
   );
-  assert.equal(await stat(path.join(sharedCodexHome, "mcp.json")).catch(() => null), null);
+  assert.match(await readFile(path.join(sharedCodexHome, "mcp.json"), "utf8"), /unsafe/);
 
   await writeFile(
     fakeCodexScript,
@@ -125,21 +123,18 @@ test("runRootCommand skips account sync-back when the child codex process fails"
       path.join(runtimePaths.accountStateDirectory, "codex-home", "observed-auth.txt"),
       "utf8",
     ),
-    /before-child/,
+    /failed-child/,
   );
-  assertEvent(events, "root.runtime_model.isolated_execution.shared_sync_back.complete", "info");
-  assertEvent(events, "root.runtime_model.isolated_execution.sync_back_skipped", "warn");
+  assertEvent(events, "root.runtime_model.isolated_execution.direct_links_active", "info");
   assert.equal(
     events.some(
-      (entry) =>
-        entry.event === "root.runtime_model.isolated_execution.account_lock_acquiring" &&
-        entry.details?.purpose === "account-sync-back",
+      (entry) => entry.event.includes("sync_back"),
     ),
     false,
   );
 });
 
-test("runRootCommand allows concurrent isolated children on the same account and serializes sync-back", async (t) => {
+test("runRootCommand reuses the same linked codex-home across concurrent terminals of one account", async (t) => {
   const tempRoot = await createTempDir("codexes-root-concurrent-same-account");
   t.after(async () => removeTempDir(tempRoot));
 
@@ -234,19 +229,23 @@ test("runRootCommand allows concurrent isolated children on the same account and
   }));
   await waitForPath(path.join(controlRoot, "started-second"), 2_000);
 
+  const startedFirstHome = await readFile(path.join(controlRoot, "started-first"), "utf8");
+  const startedSecondHome = await readFile(path.join(controlRoot, "started-second"), "utf8");
+  assert.equal(startedFirstHome, startedSecondHome);
+
   await writeFile(path.join(controlRoot, "release"), "1", "utf8");
 
   assert.deepEqual(await Promise.all([firstRun, secondRun]), [0, 0]);
   assert.match(
-    await readFile(path.join(runtimePaths.accountStateDirectory, "sessions", "first.json"), "utf8"),
+    await readFile(path.join(sharedCodexHome, "sessions", "first.json"), "utf8"),
     /first/,
   );
   assert.match(
-    await readFile(path.join(runtimePaths.accountStateDirectory, "sessions", "second.json"), "utf8"),
+    await readFile(path.join(sharedCodexHome, "sessions", "second.json"), "utf8"),
     /second/,
   );
   assertEvent(events, "root.runtime_model.isolated_execution.child_run.start", "info");
-  assertEvent(events, "root.runtime_model.isolated_execution.account_sync_back.start", "info");
+  assertEvent(events, "root.runtime_model.isolated_execution.direct_links_active", "info");
   assert.equal(
     events.some((entry) => entry.event.includes("lock")),
     false,

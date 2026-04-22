@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import type { ResolvedPaths } from "../src/core/paths.js";
@@ -13,27 +12,16 @@ import {
   removeTempDir,
 } from "./test-helpers.js";
 
-test("runtime initialization links shared home to the live legacy Codex home", async (t) => {
+test("runtime initialization bootstraps wrapper state without creating shared-home snapshots", async (t) => {
   const tempRoot = await createTempDir("codexes-runtime-init");
   t.after(async () => removeTempDir(tempRoot));
 
-  const legacyHomeRoot = path.join(tempRoot, "home");
-  const legacyCodexHome = path.join(legacyHomeRoot, ".codex");
-  const sharedCodexHome = path.join(tempRoot, "data", "shared-home");
-
-  await mkdir(path.join(legacyCodexHome, "trust"), { recursive: true });
-  await writeFile(
-    path.join(legacyCodexHome, "config.toml"),
-    'cli_auth_credentials_store = "keyring"\nmodel = "gpt-5"\n',
-    "utf8",
-  );
-  await writeFile(path.join(legacyCodexHome, "mcp.json"), '{ "mcp": true }\n', "utf8");
-  await writeFile(path.join(legacyCodexHome, "trust", "allow.txt"), "trusted\n", "utf8");
-
-  t.mock.method(os, "homedir", () => legacyHomeRoot);
+  const liveCodexHome = path.join(tempRoot, "live-codex-home");
+  await mkdir(liveCodexHome, { recursive: true });
+  await writeFile(path.join(liveCodexHome, "config.toml"), 'model = "gpt-5"\n', "utf8");
 
   const { events, logger } = createTestLogger();
-  const paths = createResolvedPaths({ projectRoot: tempRoot, sharedCodexHome });
+  const paths = createResolvedPaths({ projectRoot: tempRoot, sharedCodexHome: liveCodexHome });
 
   const result = await initializeRuntimeEnvironment({
     env: {},
@@ -42,115 +30,59 @@ test("runtime initialization links shared home to the live legacy Codex home", a
   });
 
   assert.equal(result.firstRun, true);
-  assert.match(await readFile(path.join(sharedCodexHome, "config.toml"), "utf8"), /model = "gpt-5"/);
-  assert.match(await readFile(path.join(sharedCodexHome, "mcp.json"), "utf8"), /"mcp": true/);
-  assert.equal(
-    (await readFile(path.join(sharedCodexHome, "trust", "allow.txt"), "utf8")).trim(),
-    "trusted",
-  );
-
-  await writeFile(path.join(legacyCodexHome, "config.toml"), 'model = "gpt-5.4"\n', "utf8");
-  await writeFile(path.join(legacyCodexHome, "mcp.json"), '{ "mcp": "live" }\n', "utf8");
-  await writeFile(path.join(legacyCodexHome, "trust", "new.txt"), "live\n", "utf8");
-
-  assert.match(await readFile(path.join(sharedCodexHome, "config.toml"), "utf8"), /gpt-5\.4/);
-  assert.match(await readFile(path.join(sharedCodexHome, "mcp.json"), "utf8"), /"live"/);
-  assert.equal((await readFile(path.join(sharedCodexHome, "trust", "new.txt"), "utf8")).trim(), "live");
+  assert.equal(result.sharedCodexHome, liveCodexHome);
+  assert.equal(await stat(path.join(paths.dataRoot, "shared-home")).catch(() => null), null);
 
   const registry = await readJson<{ schemaVersion: number; accounts: unknown[] }>(paths.registryFile);
   assert.equal(registry.schemaVersion, 1);
   assert.deepEqual(registry.accounts, []);
 
-  assertEvent(events, "runtime_init.config_linked", "info");
-  assertEvent(events, "runtime_init.file_linked", "info");
-  assertEvent(events, "runtime_init.directory_artifact_linked", "info");
+  assertEvent(events, "runtime_init.path_model", "debug");
+  assertEvent(events, "runtime_init.live_codex_home_ready", "debug");
+  assertEvent(events, "runtime_init.registry_bootstrap", "info");
+  assertEvent(events, "runtime_init.complete", "info");
 });
 
-test("runtime initialization replaces stale shared artifacts with live links from legacy Codex home", async (t) => {
-  const tempRoot = await createTempDir("codexes-runtime-init-refresh");
+test("runtime initialization reuses an existing registry and keeps live codex home untouched", async (t) => {
+  const tempRoot = await createTempDir("codexes-runtime-init-reuse");
   t.after(async () => removeTempDir(tempRoot));
 
-  const legacyHomeRoot = path.join(tempRoot, "home");
-  const legacyCodexHome = path.join(legacyHomeRoot, ".codex");
-  const sharedCodexHome = path.join(tempRoot, "data", "shared-home");
-
-  await mkdir(path.join(legacyCodexHome, "trust"), { recursive: true });
-  await mkdir(path.join(sharedCodexHome, "trust"), { recursive: true });
-  await writeFile(path.join(legacyCodexHome, "config.toml"), 'model = "fresh"\n', "utf8");
-  await writeFile(path.join(legacyCodexHome, "mcp.json"), '{ "mcp": "fresh" }\n', "utf8");
-  await writeFile(path.join(legacyCodexHome, "trust", "source.txt"), "source\n", "utf8");
-  await writeFile(path.join(sharedCodexHome, "config.toml"), 'model = "stale"\n', "utf8");
-  await writeFile(path.join(sharedCodexHome, "mcp.json"), '{ "mcp": "stale" }\n', "utf8");
-  await writeFile(path.join(sharedCodexHome, "trust", "source.txt"), "stale\n", "utf8");
-
-  t.mock.method(os, "homedir", () => legacyHomeRoot);
-
-  const { events, logger } = createTestLogger();
-  const paths = createResolvedPaths({ projectRoot: tempRoot, sharedCodexHome });
-
-  await initializeRuntimeEnvironment({
-    env: {},
-    logger,
-    paths,
-  });
-
-  assert.match(await readFile(path.join(sharedCodexHome, "config.toml"), "utf8"), /fresh/);
-  assert.match(await readFile(path.join(sharedCodexHome, "mcp.json"), "utf8"), /fresh/);
-  assert.equal(
-    (await readFile(path.join(sharedCodexHome, "trust", "source.txt"), "utf8")).trim(),
-    "source",
+  const liveCodexHome = path.join(tempRoot, "live-codex-home");
+  const dataRoot = path.join(tempRoot, "data");
+  await mkdir(liveCodexHome, { recursive: true });
+  await mkdir(dataRoot, { recursive: true });
+  await writeFile(path.join(liveCodexHome, "config.toml"), 'model = "before"\n', "utf8");
+  await writeFile(
+    path.join(dataRoot, "registry.json"),
+    JSON.stringify({ schemaVersion: 1, accounts: [{ id: "acct-1" }] }, null, 2),
+    "utf8",
   );
 
-  await writeFile(path.join(legacyCodexHome, "config.toml"), 'model = "fresher"\n', "utf8");
-  assert.match(await readFile(path.join(sharedCodexHome, "config.toml"), "utf8"), /fresher/);
-
-  assertEvent(events, "runtime_init.config_linked", "info");
-  assertEvent(events, "runtime_init.file_linked", "info");
-  assertEvent(events, "runtime_init.directory_artifact_linked", "info");
-});
-
-test("runtime initialization keeps config and mcp links live after atomic source replacement", async (t) => {
-  const tempRoot = await createTempDir("codexes-runtime-init-atomic-refresh");
-  t.after(async () => removeTempDir(tempRoot));
-
-  const legacyHomeRoot = path.join(tempRoot, "home");
-  const legacyCodexHome = path.join(legacyHomeRoot, ".codex");
-  const sharedCodexHome = path.join(tempRoot, "data", "shared-home");
-
-  await mkdir(legacyCodexHome, { recursive: true });
-  await writeFile(path.join(legacyCodexHome, "config.toml"), 'model = "before"\n', "utf8");
-  await writeFile(path.join(legacyCodexHome, "mcp.json"), '{ "mcp": "before" }\n', "utf8");
-
-  t.mock.method(os, "homedir", () => legacyHomeRoot);
-
-  const { logger } = createTestLogger();
-  const paths = createResolvedPaths({ projectRoot: tempRoot, sharedCodexHome });
-
-  await initializeRuntimeEnvironment({ env: {}, logger, paths });
-
-
-  await writeFile(path.join(legacyCodexHome, "config.toml.tmp"), 'model = "after"\n', "utf8");
-  await rename(path.join(legacyCodexHome, "config.toml.tmp"), path.join(legacyCodexHome, "config.toml"));
-  await writeFile(path.join(legacyCodexHome, "mcp.json.tmp"), '{ "mcp": "after" }\n', "utf8");
-  await rename(path.join(legacyCodexHome, "mcp.json.tmp"), path.join(legacyCodexHome, "mcp.json"));
-
-  await initializeRuntimeEnvironment({ env: {}, logger, paths });
-
-  assert.match(await readFile(path.join(sharedCodexHome, "config.toml"), "utf8"), /after/);
-  assert.match(await readFile(path.join(sharedCodexHome, "mcp.json"), "utf8"), /after/);
-});
-
-test("runtime initialization creates fallback config when legacy Codex home is missing", async (t) => {
-  const tempRoot = await createTempDir("codexes-runtime-init-fallback");
-  t.after(async () => removeTempDir(tempRoot));
-
-  const legacyHomeRoot = path.join(tempRoot, "home");
-  const sharedCodexHome = path.join(tempRoot, "data", "shared-home");
-
-  t.mock.method(os, "homedir", () => legacyHomeRoot);
-
   const { events, logger } = createTestLogger();
-  const paths = createResolvedPaths({ projectRoot: tempRoot, sharedCodexHome });
+  const paths = createResolvedPaths({ projectRoot: tempRoot, sharedCodexHome: liveCodexHome });
+
+  const result = await initializeRuntimeEnvironment({
+    env: {},
+    logger,
+    paths,
+  });
+
+  assert.equal(result.firstRun, false);
+  assert.deepEqual(
+    await readJson<{ schemaVersion: number; accounts: Array<{ id: string }> }>(paths.registryFile),
+    { schemaVersion: 1, accounts: [{ id: "acct-1" }] },
+  );
+  assert.equal(await stat(path.join(paths.dataRoot, "shared-home")).catch(() => null), null);
+  assertEvent(events, "runtime_init.registry_exists", "debug");
+});
+
+test("runtime initialization warns when the live codex home is missing but still prepares wrapper directories", async (t) => {
+  const tempRoot = await createTempDir("codexes-runtime-init-missing-home");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const missingCodexHome = path.join(tempRoot, "missing-codex-home");
+  const { events, logger } = createTestLogger();
+  const paths = createResolvedPaths({ projectRoot: tempRoot, sharedCodexHome: missingCodexHome });
 
   await initializeRuntimeEnvironment({
     env: {},
@@ -158,9 +90,9 @@ test("runtime initialization creates fallback config when legacy Codex home is m
     paths,
   });
 
-  const sharedConfig = await readFile(path.join(sharedCodexHome, "config.toml"), "utf8");
-  assert.match(sharedConfig, /cli_auth_credentials_store = "file"/);
-  assertEvent(events, "runtime_init.config_created", "info");
+  assert.ok(await stat(paths.accountRoot).catch(() => null));
+  assert.ok(await stat(paths.runtimeRoot).catch(() => null));
+  assertEvent(events, "runtime_init.live_codex_home_missing", "warn");
 });
 
 function createResolvedPaths(input: {

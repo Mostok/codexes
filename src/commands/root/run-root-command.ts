@@ -1,3 +1,4 @@
+import path from "node:path";
 import { createLogger } from "../../logging/logger.js";
 import type { AppContext } from "../../core/context.js";
 import { createAccountRegistry } from "../../accounts/account-registry.js";
@@ -14,8 +15,6 @@ import { runAccountUseCommand } from "../account-use/run-account-use-command.js"
 import {
   activateAccountIntoSharedRuntime,
   restoreSharedRuntimeFromBackup,
-  syncExecutionWorkspaceBackToAccount,
-  syncExecutionWorkspaceBackToSharedHome,
   syncSharedRuntimeBackToAccount,
 } from "../../runtime/activate-account/activate-account.js";
 import {
@@ -266,8 +265,6 @@ export async function runRootCommand(context: AppContext): Promise<number> {
     phase: "prepare",
   });
 
-  let workspaceCanBeCleanedUp = false;
-
   try {
     logger.info("runtime_model.isolated_execution.child_run.start", {
       accountId: activeAccount.id,
@@ -290,85 +287,15 @@ export async function runRootCommand(context: AppContext): Promise<number> {
       phase: "child_run",
     });
 
-    if (exitCode !== 0) {
-      logger.info("runtime_model.isolated_execution.shared_sync_back.start", {
-        accountId: activeAccount.id,
-        label: activeAccount.label,
-        sessionId: workspace.sessionId,
-        purpose: "failed-run-trust-sync-back",
-        phase: "shared_sync_back",
-        allowedPatterns: ["trust/**"],
-      });
-      await syncExecutionWorkspaceBackToSharedHome({
-        allowedPathPatterns: ["trust/**"],
-        logger,
-        runtimeContract,
-        sharedCodexHome: context.paths.sharedCodexHome,
-        workspace,
-      });
-      logger.info("runtime_model.isolated_execution.shared_sync_back.complete", {
-        accountId: activeAccount.id,
-        label: activeAccount.label,
-        sessionId: workspace.sessionId,
-        purpose: "failed-run-trust-sync-back",
-        phase: "shared_sync_back",
-        allowedPatterns: ["trust/**"],
-      });
-
-      logger.warn("runtime_model.isolated_execution.sync_back_skipped", {
-        accountId: activeAccount.id,
-        sessionId: workspace.sessionId,
-        exitCode,
-        sharedSyncBackCompleted: true,
-        reason: "child process exited unsuccessfully; account sync skipped and shared sync-back limited to trust/**",
-      });
-      workspaceCanBeCleanedUp = true;
-      return exitCode;
-    }
-
-    logger.info("runtime_model.isolated_execution.account_sync_back.start", {
+    logger.info("runtime_model.isolated_execution.direct_links_active", {
       accountId: activeAccount.id,
       label: activeAccount.label,
       sessionId: workspace.sessionId,
-      purpose: "account-sync-back",
-      phase: "account_sync_back",
-    });
-    logger.info("runtime_model.isolated_execution.shared_sync_back.start", {
-      accountId: activeAccount.id,
-      label: activeAccount.label,
-      sessionId: workspace.sessionId,
-      purpose: "shared-sync-back",
-      phase: "shared_sync_back",
-    });
-    await syncExecutionWorkspaceBackToSharedHome({
-      logger,
-      runtimeContract,
+      codexHome: workspace.codexHome,
+      authSource: path.join(workspace.accountStateRoot, "auth.json"),
       sharedCodexHome: context.paths.sharedCodexHome,
-      workspace,
+      syncBackRequired: false,
     });
-    logger.info("runtime_model.isolated_execution.shared_sync_back.complete", {
-      accountId: activeAccount.id,
-      label: activeAccount.label,
-      sessionId: workspace.sessionId,
-      purpose: "shared-sync-back",
-      phase: "shared_sync_back",
-    });
-
-    await syncExecutionWorkspaceBackToAccount({
-      account: activeAccount,
-      logger,
-      runtimeContract,
-      workspace,
-    });
-    logger.info("runtime_model.isolated_execution.account_sync_back.complete", {
-      accountId: activeAccount.id,
-      label: activeAccount.label,
-      sessionId: workspace.sessionId,
-      purpose: "account-sync-back",
-      phase: "account_sync_back",
-    });
-
-    workspaceCanBeCleanedUp = true;
 
     logger.info("runtime_model.isolated_execution.complete", {
       accountId: activeAccount.id,
@@ -385,30 +312,21 @@ export async function runRootCommand(context: AppContext): Promise<number> {
       workspaceRoot: workspace.workspaceRoot,
       phase: "cleanup",
     });
-    if (workspaceCanBeCleanedUp) {
-      await cleanupExecutionWorkspace({
-        logger,
-        workspace,
-      });
-    } else {
-      await sanitizeRetainedExecutionWorkspace({
-        logger,
-        runtimeContract,
-        workspace,
-      });
-      logger.warn("runtime_model.isolated_execution.workspace_retained", {
-        accountId: activeAccount.id,
-        sessionId: workspace.sessionId,
-        workspaceRoot: workspace.workspaceRoot,
-        reason: "sync-back did not complete successfully",
-      });
-    }
+    await cleanupExecutionWorkspace({
+      logger,
+      workspace,
+    });
+    await sanitizeRetainedExecutionWorkspace({
+      logger,
+      runtimeContract,
+      workspace,
+    });
     logger.info("runtime_model.isolated_execution.cleanup.complete", {
       accountId: activeAccount.id,
       label: activeAccount.label,
       sessionId: workspace.sessionId,
       workspaceRoot: workspace.workspaceRoot,
-      cleanedUp: workspaceCanBeCleanedUp,
+      cleanedUp: false,
       phase: "cleanup",
     });
   }
@@ -488,8 +406,8 @@ function buildHelpText(): string {
     "  codexes account remove <account-id-or-label>",
     "",
     "Runtime model:",
-    "  Shared CODEX_HOME is preserved in a wrapper-owned runtime root.",
-    "  Account auth state is stored per account and synced back selectively.",
+    "  Shared CODEX_HOME stays the live Codex home.",
+    "  Each account reuses its own linked codex-home with only auth.json routed per account.",
     "",
     "Current status:",
     "  Account management and default Codex passthrough are implemented.",

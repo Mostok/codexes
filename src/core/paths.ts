@@ -19,19 +19,24 @@ export function resolvePaths(
   env: NodeJS.ProcessEnv,
 ): ResolvedPaths {
   const baseDataDir = resolveBaseDataDir(env);
+  const sharedCodexHome = resolveCodexHome(env);
 
   return {
     projectRoot: cwd,
     dataRoot: baseDataDir,
-    sharedCodexHome: env.CODEX_HOME ?? path.join(baseDataDir, "shared-home"),
+    sharedCodexHome,
     accountRoot: path.join(baseDataDir, "accounts"),
     runtimeRoot: path.join(baseDataDir, "runtime"),
     executionRoot: path.join(baseDataDir, "runtime", "executions"),
     registryFile: path.join(baseDataDir, "registry.json"),
     wrapperConfigFile: path.join(baseDataDir, "codexes.json"),
-    codexConfigFile: path.join(env.CODEX_HOME ?? path.join(baseDataDir, "shared-home"), "config.toml"),
+    codexConfigFile: path.join(sharedCodexHome, "config.toml"),
     selectionCacheFile: path.join(baseDataDir, "selection-cache.json"),
   };
+}
+
+function resolveCodexHome(env: NodeJS.ProcessEnv): string {
+  return env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
 }
 
 function resolveBaseDataDir(env: NodeJS.ProcessEnv): string {
