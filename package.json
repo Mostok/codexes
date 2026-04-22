@@ -1,6 +1,6 @@
 {
   "name": "@mostok/codexes",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Transparent multi-account wrapper around the Codex CLI.",
   "type": "module",
   "bin": {
