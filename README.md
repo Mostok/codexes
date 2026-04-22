@@ -31,6 +31,7 @@ codexes --help
 
 - Shared `CODEX_HOME` for stable `config.toml`, `mcp.json`, and `trust/`
 - Per-account auth activation for `auth.json` and `sessions/`
+- Shared `trust/` sync-back even after unsuccessful child exits, so trusted project decisions persist
 - Runtime locking to avoid concurrent mutation of the shared Codex home
 - Experimental account selection by remaining primary and secondary window percentages
 - Packaged npm distribution with smoke coverage for real installs
@@ -54,6 +55,8 @@ Before launch, `codexes` prints a compact English execution summary that include
 `codexes account add` accepts an optional `--paid-at dd.mm.yyyy` flag. The value is normalized to ISO in `account.json` and shown in `codexes account list` under the `Payed at` column. If you need to change that stored date later, use `codexes account set-paid-at <account-id-or-label> <dd.mm.yyyy>`.
 
 `codexes account list` now uses a dedicated diagnostic table with columns for label, account id, `Payed at`, flags, status, remaining percentages, plan, and source. Footer lines under the table still carry `Selected account`, `Fallback`, and `Execution note` diagnostics, so the command remains read-only and informative even when no execution winner exists. Wrapped execution commands remain strict and still use the compact summary contract before launch.
+
+For wrapped launches, `codexes` now keeps the caller's working directory and logs the resolved `sandbox` / `approval` policy in DEBUG output. If a `codex` child session exits with a non-zero code, the wrapper still syncs shared `trust/` changes back before skipping account-scoped sync.
 
 ## Documentation
 

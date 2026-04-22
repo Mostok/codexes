@@ -9,12 +9,17 @@ export async function spawnCodexCommand(input: {
   logger: Logger;
 }): Promise<number> {
   const launchSpec = await resolveCodexLaunchSpec(input.codexBinaryPath, input.argv);
+  const launchPolicy = extractLaunchPolicy(launchSpec.args);
+  const launchCwd = process.cwd();
 
   input.logger.info("spawn_codex.start", {
     codexBinaryPath: input.codexBinaryPath,
     resolvedCommand: launchSpec.command,
     codexHome: input.codexHome,
+    cwd: launchCwd,
     argv: launchSpec.args,
+    sandboxMode: launchPolicy.sandboxMode,
+    approvalMode: launchPolicy.approvalMode,
     stdinIsTTY: process.stdin.isTTY ?? false,
     stdoutIsTTY: process.stdout.isTTY ?? false,
     stderrIsTTY: process.stderr.isTTY ?? false,
@@ -22,6 +27,7 @@ export async function spawnCodexCommand(input: {
 
   return new Promise((resolve, reject) => {
     const child = spawn(launchSpec.command, launchSpec.args, {
+      cwd: launchCwd,
       env: {
         ...process.env,
         CODEX_HOME: input.codexHome,
@@ -62,6 +68,7 @@ export async function spawnCodexCommand(input: {
       cleanup();
       input.logger.error("spawn_codex.error", {
         codexBinaryPath: input.codexBinaryPath,
+        cwd: launchCwd,
         message: error.message,
       });
       reject(error);
@@ -78,8 +85,42 @@ export async function spawnCodexCommand(input: {
         codexBinaryPath: input.codexBinaryPath,
         exitCode,
         signal,
+        cwd: launchCwd,
+        sandboxMode: launchPolicy.sandboxMode,
+        approvalMode: launchPolicy.approvalMode,
       });
       resolve(exitCode ?? 1);
     });
   });
+}
+
+function extractLaunchPolicy(args: string[]): {
+  approvalMode: string | null;
+  sandboxMode: string | null;
+} {
+  return {
+    approvalMode: findOptionValue(args, ["--ask-for-approval", "--approval-mode"]),
+    sandboxMode: findOptionValue(args, ["--sandbox"]),
+  };
+}
+
+function findOptionValue(args: string[], names: string[]): string | null {
+  for (let index = args.length - 1; index >= 0; index -= 1) {
+    const value = args[index];
+    if (!value) {
+      continue;
+    }
+
+    for (const name of names) {
+      if (value === name) {
+        return args[index + 1] ?? null;
+      }
+
+      if (value.startsWith(`${name}=`)) {
+        return value.slice(name.length + 1);
+      }
+    }
+  }
+
+  return null;
 }

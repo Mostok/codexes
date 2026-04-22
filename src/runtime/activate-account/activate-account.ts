@@ -157,13 +157,17 @@ export async function syncExecutionWorkspaceBackToAccount(input: {
 }
 
 export async function syncExecutionWorkspaceBackToSharedHome(input: {
+  allowedPathPatterns?: readonly string[];
   logger: Logger;
   runtimeContract: RuntimeContract;
   sharedCodexHome: string;
   workspace: ExecutionWorkspace;
 }): Promise<void> {
   const sharedRules = input.runtimeContract.fileRules.filter(
-    (rule) => rule.classification === "shared" && rule.syncBack === "if-changed",
+    (rule) =>
+      rule.classification === "shared" &&
+      rule.syncBack === "if-changed" &&
+      (!input.allowedPathPatterns || input.allowedPathPatterns.includes(rule.pathPattern)),
   );
 
   input.logger.info("execution_workspace_shared_sync.start", {

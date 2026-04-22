@@ -344,11 +344,45 @@ export async function runRootCommand(context: AppContext): Promise<number> {
     });
 
     if (exitCode !== 0) {
+      logger.info("runtime_model.isolated_execution.shared_sync_back.start", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        sessionId: workspace.sessionId,
+        purpose: "failed-run-trust-sync-back",
+        phase: "shared_sync_back",
+        allowedPatterns: ["trust/**"],
+      });
+      const failedRunSharedSyncLock = await acquireSharedSyncLock({
+        logger,
+        runtimeRoot: context.paths.runtimeRoot,
+      });
+
+      try {
+        await syncExecutionWorkspaceBackToSharedHome({
+          allowedPathPatterns: ["trust/**"],
+          logger,
+          runtimeContract,
+          sharedCodexHome: context.paths.sharedCodexHome,
+          workspace,
+        });
+      } finally {
+        await failedRunSharedSyncLock.release();
+      }
+      logger.info("runtime_model.isolated_execution.shared_sync_back.complete", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        sessionId: workspace.sessionId,
+        purpose: "failed-run-trust-sync-back",
+        phase: "shared_sync_back",
+        allowedPatterns: ["trust/**"],
+      });
+
       logger.warn("runtime_model.isolated_execution.sync_back_skipped", {
         accountId: activeAccount.id,
         sessionId: workspace.sessionId,
         exitCode,
-        reason: "child process exited unsuccessfully",
+        sharedSyncBackCompleted: true,
+        reason: "child process exited unsuccessfully; account sync skipped and shared sync-back limited to trust/**",
       });
       workspaceCanBeCleanedUp = true;
       return exitCode;
@@ -372,6 +406,13 @@ export async function runRootCommand(context: AppContext): Promise<number> {
         label: activeAccount.label,
         sessionId: workspace.sessionId,
         purpose: "account-sync-back",
+      });
+      logger.info("runtime_model.isolated_execution.account_sync_back.start", {
+        accountId: activeAccount.id,
+        label: activeAccount.label,
+        sessionId: workspace.sessionId,
+        purpose: "account-sync-back",
+        phase: "account_sync_back",
       });
       logger.info("runtime_model.isolated_execution.shared_sync_back.start", {
         accountId: activeAccount.id,
@@ -402,13 +443,7 @@ export async function runRootCommand(context: AppContext): Promise<number> {
         purpose: "shared-sync-back",
         phase: "shared_sync_back",
       });
-      logger.info("runtime_model.isolated_execution.account_sync_back.start", {
-        accountId: activeAccount.id,
-        label: activeAccount.label,
-        sessionId: workspace.sessionId,
-        purpose: "account-sync-back",
-        phase: "account_sync_back",
-      });
+
       await syncExecutionWorkspaceBackToAccount({
         account: activeAccount,
         logger,

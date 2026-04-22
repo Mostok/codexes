@@ -67,7 +67,7 @@ The wrapper separates runtime files into four classes:
 - Ephemeral: caches, logs, history, temp files
 - Protected: SQLite state and keyring-related artifacts
 
-Only account-scoped files are activated into the shared Codex home before launching the real `codex` process. Shared files stay stable across accounts, which keeps MCP configuration and trust state consistent.
+Only account-scoped files are activated into the shared Codex home before launching the real `codex` process. Shared files stay stable across accounts, which keeps MCP configuration and trust state consistent. After each wrapped run, shared artifacts such as `trust/` and `mcp.json` are synced back from the isolated execution workspace. That shared sync also runs after non-zero child exits so trusted-project decisions are not lost when a session fails or is interrupted.
 
 ## MCP Continuity
 
@@ -394,3 +394,13 @@ Fix:
 - [README](../README.md) - project landing page and quick start
 - [Auth State Spike](research/auth-state-spike.md) - research notes about stored auth state behavior
 - [Process Notes](../src/process/README.md) - details about launching the real `codex` process
+
+## Troubleshooting
+
+### Repeated trust prompt for the same project
+
+If `codex` keeps asking `Do you trust the contents of this directory?` for a project you already trusted, verify that you are still launching through the same shared `CODEX_HOME` and let the wrapped session exit far enough for `codexes` to finish its shared sync. Recent versions also sync `trust/` back after non-zero child exits, so repeated prompts after interrupted sessions should stop once you rebuild and reinstall the updated wrapper.
+
+### Unexpected `read-only` mode
+
+`codexes` forwards the original launch argv to the real `codex` process and now logs the resolved `sandbox` and `approval` policy in DEBUG output together with the inherited working directory. If another tool launches `codexes`, inspect those DEBUG fields first to confirm the upstream caller is still passing the expected `--sandbox` and approval flags.

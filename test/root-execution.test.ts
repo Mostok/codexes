@@ -40,6 +40,9 @@ test("runRootCommand skips account sync-back when the child codex process fails"
       "await writeFile(path.join(process.env.CODEX_HOME, 'auth.json'), '{\"last_refresh\":\"failed-child\"}\\n', 'utf8');",
       "await mkdir(path.join(process.env.CODEX_HOME, 'sessions'), { recursive: true });",
       "await writeFile(path.join(process.env.CODEX_HOME, 'sessions', 'failed.json'), '{}\\n', 'utf8');",
+      "await mkdir(path.join(process.env.CODEX_HOME, 'trust'), { recursive: true });",
+      "await writeFile(path.join(process.env.CODEX_HOME, 'trust', 'failed.txt'), 'shared-trust\\n', 'utf8');",
+      "await writeFile(path.join(process.env.CODEX_HOME, 'mcp.json'), '{\"mcpServers\":{\"unsafe\":{\"command\":\"node\"}}}\\n', 'utf8');",
       "process.exit(7);",
       "",
     ].join("\n"),
@@ -100,7 +103,21 @@ test("runRootCommand skips account sync-back when the child codex process fails"
     ),
     null,
   );
+  assert.match(
+    await readFile(path.join(sharedCodexHome, "trust", "failed.txt"), "utf8"),
+    /shared-trust/,
+  );
+  assert.equal(await stat(path.join(sharedCodexHome, "mcp.json")).catch(() => null), null);
+  assertEvent(events, "root.runtime_model.isolated_execution.shared_sync_back.complete", "info");
   assertEvent(events, "root.runtime_model.isolated_execution.sync_back_skipped", "warn");
+  assert.equal(
+    events.some(
+      (entry) =>
+        entry.event === "root.runtime_model.isolated_execution.account_lock_acquiring" &&
+        entry.details?.purpose === "account-sync-back",
+    ),
+    false,
+  );
 });
 
 test("runRootCommand allows concurrent isolated children on the same account and serializes sync-back", async (t) => {
@@ -211,6 +228,26 @@ test("runRootCommand allows concurrent isolated children on the same account and
   );
   assertEvent(events, "root.runtime_model.isolated_execution.child_run.start", "info");
   assertEvent(events, "root.runtime_model.isolated_execution.account_sync_back.start", "info");
+  const syncBackAccountLockIndex = events.findIndex(
+    (entry) =>
+      entry.event === "root.runtime_model.isolated_execution.account_lock_acquired" &&
+      entry.details?.purpose === "account-sync-back",
+  );
+  assert.notEqual(syncBackAccountLockIndex, -1);
+  const syncBackSharedLockIndex = events.findIndex(
+    (entry, index) =>
+      index > syncBackAccountLockIndex &&
+      entry.event === "root.shared_sync_lock.acquire.complete",
+  );
+  assert.notEqual(syncBackSharedLockIndex, -1);
+  const syncBackAccountReleaseIndex = events.findIndex(
+    (entry, index) =>
+      index > syncBackAccountLockIndex &&
+      entry.event === "root.runtime_model.isolated_execution.account_lock_releasing" &&
+      entry.details?.purpose === "account-sync-back",
+  );
+  assert.notEqual(syncBackAccountReleaseIndex, -1);
+  assert.ok(syncBackSharedLockIndex < syncBackAccountReleaseIndex);
   assert.equal(
     events.some((entry) => entry.event === "root.account_sync_lock.acquire.timeout"),
     false,

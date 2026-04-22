@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { spawnCodexCommand } from "../src/process/spawn-codex-command.js";
@@ -11,12 +11,14 @@ import {
   waitForPath,
 } from "./test-helpers.js";
 
-test("spawnCodexCommand passes through argv and CODEX_HOME", async (t) => {
+test("spawnCodexCommand passes through argv, cwd, CODEX_HOME, and launch policy", async (t) => {
   const tempRoot = await createTempDir("codexes-spawn");
   t.after(async () => removeTempDir(tempRoot));
 
+  const projectRoot = path.join(tempRoot, "project");
   const outputFile = path.join(tempRoot, "output.json");
   const scriptPath = path.join(tempRoot, "fake-codex.mjs");
+  await mkdir(projectRoot, { recursive: true });
   await writeFile(
     scriptPath,
     [
@@ -24,6 +26,7 @@ test("spawnCodexCommand passes through argv and CODEX_HOME", async (t) => {
       "await writeFile(process.env.TEST_OUTPUT_FILE, JSON.stringify({",
       "  argv: process.argv.slice(2),",
       "  codexHome: process.env.CODEX_HOME ?? null,",
+      "  cwd: process.cwd(),",
       "}, null, 2));",
       "process.exit(Number(process.argv[2]?.replace('--exit=', '') ?? 0));",
       "",
@@ -33,30 +36,44 @@ test("spawnCodexCommand passes through argv and CODEX_HOME", async (t) => {
 
   const { events, logger } = createTestLogger();
   const previousOutput = process.env.TEST_OUTPUT_FILE;
+  const previousCwd = process.cwd();
   process.env.TEST_OUTPUT_FILE = outputFile;
-  t.after(() => {
+  process.chdir(projectRoot);
+
+  let exitCode: number;
+  try {
+    exitCode = await spawnCodexCommand({
+      argv: [scriptPath, "--exit=7", "--model", "gpt-5", "--sandbox", "workspace-write", "--ask-for-approval", "never"],
+      codexBinaryPath: process.execPath,
+      codexHome: path.join(tempRoot, "shared-home"),
+      logger,
+    });
+  } finally {
+    process.chdir(previousCwd);
     if (previousOutput === undefined) {
       delete process.env.TEST_OUTPUT_FILE;
-      return;
+    } else {
+      process.env.TEST_OUTPUT_FILE = previousOutput;
     }
-
-    process.env.TEST_OUTPUT_FILE = previousOutput;
-  });
-
-  const exitCode = await spawnCodexCommand({
-    argv: [scriptPath, "--exit=7", "--model", "gpt-5"],
-    codexBinaryPath: process.execPath,
-    codexHome: path.join(tempRoot, "shared-home"),
-    logger,
-  });
+  }
 
   assert.equal(exitCode, 7);
   const payload = JSON.parse(await readFile(outputFile, "utf8")) as {
     argv: string[];
     codexHome: string;
+    cwd: string;
   };
-  assert.deepEqual(payload.argv, ["--exit=7", "--model", "gpt-5"]);
+  assert.deepEqual(payload.argv, [
+    "--exit=7",
+    "--model",
+    "gpt-5",
+    "--sandbox",
+    "workspace-write",
+    "--ask-for-approval",
+    "never",
+  ]);
   assert.match(payload.codexHome, /shared-home$/);
+  assert.equal(payload.cwd, projectRoot);
   assertEvent(events, "spawn_codex.complete", "info");
 });
 
