@@ -17,6 +17,7 @@ import {
   type CodexLoginResult,
 } from "../../process/run-codex-login.js";
 import { parseAccountPaidDate } from "../../accounts/account-paid-date.js";
+import { ensureFileBackedCredentialStore } from "../../config/wrapper-config.js";
 
 const DEFAULT_LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
 const ACCOUNT_METADATA_SCHEMA_VERSION = 1;
@@ -77,15 +78,34 @@ export async function runAccountAddCommand(
     throw new Error("Could not find the real `codex` binary on PATH.");
   }
 
-  if (context.wrapperConfig.credentialStoreMode !== "file") {
-    logger.error("command.unsupported_credential_store", {
-      credentialStoreMode: context.wrapperConfig.credentialStoreMode,
-      configFilePath: context.wrapperConfig.codexConfigFilePath,
+  const credentialStore = await ensureFileBackedCredentialStore({
+    configFilePath: context.wrapperConfig.codexConfigFilePath,
+    currentMode: context.wrapperConfig.credentialStoreMode,
+    logger,
+  });
+
+  if (credentialStore.status === "unsupported") {
+    logger.warn("credential_store.unsupported", {
+      credentialStoreMode: credentialStore.effectiveMode,
+      configFilePath: credentialStore.configFilePath,
+      reason: context.wrapperConfig.credentialStorePolicyReason,
+    });
+    logger.warn("unsupported_credential_store", {
+      credentialStoreMode: credentialStore.effectiveMode,
+      configFilePath: credentialStore.configFilePath,
       reason: context.wrapperConfig.credentialStorePolicyReason,
     });
     throw new Error(
-      `codexes account add requires cli_auth_credentials_store = "file"; detected ${context.wrapperConfig.credentialStoreMode}.`,
+      `codexes account add requires cli_auth_credentials_store = "file"; detected ${credentialStore.effectiveMode}. Edit the shared Codex config file and retry.`,
     );
+  }
+
+  if (credentialStore.repaired) {
+    logger.info("credential_store_repaired", {
+      configFilePath: credentialStore.configFilePath,
+      previousMode: credentialStore.previousMode,
+      effectiveMode: credentialStore.effectiveMode,
+    });
   }
 
   const registry = createAccountRegistry({
@@ -108,7 +128,7 @@ export async function runAccountAddCommand(
 
   const runtimeContract = createRuntimeContract({
     accountRoot: context.paths.accountRoot,
-    credentialStoreMode: context.wrapperConfig.credentialStoreMode,
+    credentialStoreMode: credentialStore.effectiveMode,
     logger,
     runtimeRoot: context.paths.runtimeRoot,
     executionRoot: context.paths.executionRoot,

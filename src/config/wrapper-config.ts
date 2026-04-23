@@ -1,4 +1,5 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import path from "node:path";
 import type { Logger } from "../logging/logger.js";
 import type { ResolvedPaths } from "../core/paths.js";
 
@@ -30,8 +31,26 @@ export interface ExperimentalSelectionConfig {
   useAccountIdHeader: boolean;
 }
 
+export type CredentialStoreRepairResult =
+  | {
+      configFilePath: string;
+      effectiveMode: "file";
+      previousMode: CredentialStoreMode;
+      repaired: boolean;
+      status: "ready";
+    }
+  | {
+      configFilePath: string;
+      effectiveMode: CredentialStoreMode;
+      previousMode: CredentialStoreMode;
+      repaired: false;
+      status: "unsupported";
+    };
+
 const DEFAULT_EXPERIMENTAL_PROBE_TIMEOUT_MS = 3_500;
 const DEFAULT_EXPERIMENTAL_CACHE_TTL_MS = 60_000;
+const CODEX_CONFIG_FILE_NAME = "config.toml";
+const FILE_BACKED_CREDENTIAL_STORE_LINE = 'cli_auth_credentials_store = "file"';
 
 export async function resolveWrapperConfig(input: {
   env: NodeJS.ProcessEnv;
@@ -175,6 +194,210 @@ function resolveExperimentalSelectionConfig(input: {
   };
 }
 
+export async function ensureFileBackedCredentialStore(input: {
+  configFilePath: string;
+  currentMode: CredentialStoreMode;
+  logger: Logger;
+}): Promise<CredentialStoreRepairResult> {
+  input.logger.debug("credential_store.repair_check", {
+    configFilePath: input.configFilePath,
+    credentialStoreMode: input.currentMode,
+  });
+
+  if (input.currentMode === "file") {
+    return {
+      configFilePath: input.configFilePath,
+      effectiveMode: "file",
+      previousMode: input.currentMode,
+      repaired: false,
+      status: "ready",
+    };
+  }
+
+  if (input.currentMode !== "missing") {
+    input.logger.warn("credential_store.repair_unsupported", {
+      configFilePath: input.configFilePath,
+      credentialStoreMode: input.currentMode,
+      supportedMode: "file",
+    });
+
+    return {
+      configFilePath: input.configFilePath,
+      effectiveMode: input.currentMode,
+      previousMode: input.currentMode,
+      repaired: false,
+      status: "unsupported",
+    };
+  }
+
+  try {
+    const writableConfigFilePath = await validateWritableCodexConfigPath(
+      input.configFilePath,
+      input.logger,
+    );
+    await mkdir(path.dirname(writableConfigFilePath), { recursive: true });
+
+    const existingConfig = await readFile(writableConfigFilePath, "utf8").catch(
+      (error: unknown) => {
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          error.code === "ENOENT"
+        ) {
+          return null;
+        }
+
+        throw error;
+      },
+    );
+
+    const nextConfig =
+      existingConfig === null || existingConfig.length === 0
+        ? `${FILE_BACKED_CREDENTIAL_STORE_LINE}\n`
+        : insertTopLevelTomlLine(existingConfig, FILE_BACKED_CREDENTIAL_STORE_LINE);
+
+    await writeFile(writableConfigFilePath, nextConfig, "utf8");
+
+    input.logger.info(
+      existingConfig === null
+        ? "credential_store.config_created"
+        : "credential_store.config_repaired",
+      {
+        configFilePath: writableConfigFilePath,
+        previousMode: input.currentMode,
+        effectiveMode: "file",
+      },
+    );
+
+    return {
+      configFilePath: writableConfigFilePath,
+      effectiveMode: "file",
+      previousMode: input.currentMode,
+      repaired: true,
+      status: "ready",
+    };
+  } catch (error) {
+    input.logger.error("credential_store.repair_failed", {
+      configFilePath: input.configFilePath,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
+async function validateWritableCodexConfigPath(
+  configFilePath: string,
+  logger: Logger,
+): Promise<string> {
+  const resolvedDirectoryPath = path.resolve(path.dirname(configFilePath));
+  const resolvedConfigFilePath = path.resolve(configFilePath);
+  const expectedConfigFilePath = path.join(resolvedDirectoryPath, CODEX_CONFIG_FILE_NAME);
+
+  if (path.basename(resolvedConfigFilePath) !== CODEX_CONFIG_FILE_NAME) {
+    logger.error("credential_store.invalid_config_target", {
+      configFilePath,
+      expectedFileName: CODEX_CONFIG_FILE_NAME,
+    });
+    throw new Error("Unsafe Codex config target.");
+  }
+
+  if (resolvedConfigFilePath !== expectedConfigFilePath) {
+    logger.error("credential_store.invalid_config_target", {
+      configFilePath,
+      expectedConfigFilePath,
+      resolvedConfigFilePath,
+    });
+    throw new Error("Unsafe Codex config target.");
+  }
+
+  const existingAncestorPath = await findNearestExistingPath(resolvedDirectoryPath);
+  await ensurePathDoesNotUseSymlink(existingAncestorPath, logger);
+
+  const relativeSuffix = path.relative(existingAncestorPath, resolvedDirectoryPath);
+  let currentPath = await realpath(existingAncestorPath);
+  if (relativeSuffix !== "") {
+    for (const segment of relativeSuffix.split(path.sep)) {
+      currentPath = path.join(currentPath, segment);
+      await ensurePathDoesNotUseSymlink(currentPath, logger, { allowMissing: true });
+    }
+  }
+
+  await ensurePathDoesNotUseSymlink(resolvedConfigFilePath, logger, { allowMissing: true });
+  return resolvedConfigFilePath;
+}
+
+async function findNearestExistingPath(targetPath: string): Promise<string> {
+  let currentPath = targetPath;
+
+  while (true) {
+    const stats = await lstat(currentPath).catch((error: unknown) => {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return null;
+      }
+
+      throw error;
+    });
+
+    if (stats) {
+      return currentPath;
+    }
+
+    const parentPath = path.dirname(currentPath);
+    if (parentPath === currentPath) {
+      return currentPath;
+    }
+    currentPath = parentPath;
+  }
+}
+
+async function ensurePathDoesNotUseSymlink(
+  targetPath: string,
+  logger: Logger,
+  options?: { allowMissing?: boolean },
+): Promise<void> {
+  const stats = await lstat(targetPath).catch((error: unknown) => {
+    if (
+      options?.allowMissing &&
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return null;
+    }
+
+    throw error;
+  });
+
+  if (stats?.isSymbolicLink()) {
+    logger.error("credential_store.symlink_blocked", {
+      configPath: targetPath,
+    });
+    throw new Error("Unsafe Codex config target.");
+  }
+}
+
+function insertTopLevelTomlLine(rawConfig: string, line: string): string {
+  const eol = rawConfig.includes("\r\n") ? "\r\n" : "\n";
+  const firstSectionMatch = /^[\t ]*\[/m.exec(rawConfig);
+
+  if (!firstSectionMatch || firstSectionMatch.index === undefined) {
+    return `${rawConfig}${rawConfig.endsWith("\n") ? "" : eol}${line}${eol}`;
+  }
+
+  const topLevelPrefix = rawConfig.slice(0, firstSectionMatch.index);
+  const remainingConfig = rawConfig.slice(firstSectionMatch.index);
+  const separator = topLevelPrefix.length > 0 && !topLevelPrefix.endsWith("\n") ? eol : "";
+
+  return `${topLevelPrefix}${separator}${line}${eol}${remainingConfig}`;
+}
+
 function resolveAccountSelectionStrategy(
   env: NodeJS.ProcessEnv,
   logger: Logger,
@@ -276,7 +499,8 @@ async function detectCredentialStoreMode(
 }
 
 function parseCredentialStoreMode(rawConfig: string): CredentialStoreMode {
-  const match = rawConfig.match(/^\s*cli_auth_credentials_store\s*=\s*"([^"]+)"/m);
+  const topLevelConfig = extractTopLevelTomlConfig(rawConfig);
+  const match = topLevelConfig.match(/^\s*cli_auth_credentials_store\s*=\s*"([^"]+)"/m);
 
   if (!match) {
     return "missing";
@@ -298,6 +522,16 @@ function parseCredentialStoreMode(rawConfig: string): CredentialStoreMode {
     default:
       return "unknown";
   }
+}
+
+function extractTopLevelTomlConfig(rawConfig: string): string {
+  const firstSectionMatch = /^[\t ]*\[/m.exec(rawConfig);
+
+  if (!firstSectionMatch || firstSectionMatch.index === undefined) {
+    return rawConfig;
+  }
+
+  return rawConfig.slice(0, firstSectionMatch.index);
 }
 
 function resolvePositiveIntegerEnv(input: {

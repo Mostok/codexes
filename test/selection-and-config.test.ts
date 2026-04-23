@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import {
@@ -7,7 +7,10 @@ import {
   type AccountRecord,
   type AccountRegistry,
 } from "../src/accounts/account-registry.js";
-import { resolveWrapperConfig } from "../src/config/wrapper-config.js";
+import {
+  ensureFileBackedCredentialStore,
+  resolveWrapperConfig,
+} from "../src/config/wrapper-config.js";
 import { selectAccountForExecution } from "../src/selection/select-account.js";
 import type { ResolvedPaths } from "../src/core/paths.js";
 import {
@@ -480,4 +483,225 @@ test("wrapper config accepts remaining-limit-experimental as a legacy alias", as
   assert.equal(config.accountSelectionStrategy, "remaining-limit");
   assert.equal(config.accountSelectionStrategySource, "env-override");
   assert.equal(config.experimentalSelection.enabled, true);
+});
+
+test("credential store repair creates a missing config file", async (t) => {
+  const tempRoot = await createTempDir("codexes-credential-store-create");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { events, logger } = createTestLogger();
+  const configFilePath = path.join(tempRoot, "shared-home", "config.toml");
+
+  const result = await ensureFileBackedCredentialStore({
+    configFilePath,
+    currentMode: "missing",
+    logger,
+  });
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.effectiveMode, "file");
+  assert.equal(result.repaired, true);
+  assert.equal(
+    await readFile(configFilePath, "utf8"),
+    'cli_auth_credentials_store = "file"\n',
+  );
+  assertEvent(events, "credential_store.config_created", "info");
+});
+
+test("credential store repair appends missing key without replacing existing config", async (t) => {
+  const tempRoot = await createTempDir("codexes-credential-store-append");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { events, logger } = createTestLogger();
+  const configFilePath = path.join(tempRoot, "shared-home", "config.toml");
+  await mkdir(path.dirname(configFilePath), { recursive: true });
+  await writeFile(configFilePath, 'model = "gpt-5.4"\n', "utf8");
+
+  const result = await ensureFileBackedCredentialStore({
+    configFilePath,
+    currentMode: "missing",
+    logger,
+  });
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.effectiveMode, "file");
+  assert.equal(
+    await readFile(configFilePath, "utf8"),
+    'model = "gpt-5.4"\ncli_auth_credentials_store = "file"\n',
+  );
+  assertEvent(events, "credential_store.config_repaired", "info");
+});
+
+test("credential store repair inserts missing key before the first TOML section", async (t) => {
+  const tempRoot = await createTempDir("codexes-credential-store-top-level");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { events, logger } = createTestLogger();
+  const configFilePath = path.join(tempRoot, "shared-home", "config.toml");
+  await mkdir(path.dirname(configFilePath), { recursive: true });
+  await writeFile(
+    configFilePath,
+    'model = "gpt-5.4"\n[projects."Z:/PhpstormProjects/codexes"]\ntrusted = true\n',
+    "utf8",
+  );
+
+  const result = await ensureFileBackedCredentialStore({
+    configFilePath,
+    currentMode: "missing",
+    logger,
+  });
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.effectiveMode, "file");
+  assert.equal(
+    await readFile(configFilePath, "utf8"),
+    'model = "gpt-5.4"\ncli_auth_credentials_store = "file"\n[projects."Z:/PhpstormProjects/codexes"]\ntrusted = true\n',
+  );
+  assertEvent(events, "credential_store.config_repaired", "info");
+});
+
+test("credential store repair migrates credentials store key from TOML section to top-level", async (t) => {
+  const tempRoot = await createTempDir("codexes-credential-store-section-migration");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { events, logger } = createTestLogger();
+  const sharedCodexHome = path.join(tempRoot, "shared-home");
+  const configFilePath = path.join(sharedCodexHome, "config.toml");
+  await mkdir(sharedCodexHome, { recursive: true });
+  await writeFile(
+    configFilePath,
+    '[projects."Z:/PhpstormProjects/codexes"]\ncli_auth_credentials_store = "file"\ntrusted = true\n',
+    "utf8",
+  );
+
+  const paths: ResolvedPaths = {
+    projectRoot: tempRoot,
+    dataRoot: tempRoot,
+    sharedCodexHome,
+    accountRoot: path.join(tempRoot, "accounts"),
+    runtimeRoot: path.join(tempRoot, "runtime"),
+    registryFile: path.join(tempRoot, "registry.json"),
+    wrapperConfigFile: path.join(tempRoot, "codexes.json"),
+    codexConfigFile: configFilePath,
+    selectionCacheFile: path.join(tempRoot, "selection-cache.json"),
+  };
+
+  const config = await resolveWrapperConfig({
+    env: {},
+    logger,
+    paths,
+  });
+
+  assert.equal(config.credentialStoreMode, "missing");
+
+  const result = await ensureFileBackedCredentialStore({
+    configFilePath,
+    currentMode: config.credentialStoreMode,
+    logger,
+  });
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.effectiveMode, "file");
+  assert.equal(result.repaired, true);
+  assert.equal(
+    await readFile(configFilePath, "utf8"),
+    'cli_auth_credentials_store = "file"\n[projects."Z:/PhpstormProjects/codexes"]\ncli_auth_credentials_store = "file"\ntrusted = true\n',
+  );
+  assertEvent(events, "credential_store.detected", "debug");
+  assertEvent(events, "credential_store.config_repaired", "info");
+});
+
+test("credential store repair leaves file mode unchanged", async (t) => {
+  const tempRoot = await createTempDir("codexes-credential-store-file-noop");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { events, logger } = createTestLogger();
+  const configFilePath = path.join(tempRoot, "shared-home", "config.toml");
+  await mkdir(path.dirname(configFilePath), { recursive: true });
+  await writeFile(configFilePath, 'cli_auth_credentials_store = "file"\n', "utf8");
+
+  const result = await ensureFileBackedCredentialStore({
+    configFilePath,
+    currentMode: "file",
+    logger,
+  });
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.effectiveMode, "file");
+  assert.equal(result.repaired, false);
+  assert.equal(
+    await readFile(configFilePath, "utf8"),
+    'cli_auth_credentials_store = "file"\n',
+  );
+  assertEvent(events, "credential_store.repair_check", "debug");
+});
+
+test("credential store repair refuses explicit unsupported modes", async (t) => {
+  const tempRoot = await createTempDir("codexes-credential-store-unsupported");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { events, logger } = createTestLogger();
+  const configFilePath = path.join(tempRoot, "shared-home", "config.toml");
+  await mkdir(path.dirname(configFilePath), { recursive: true });
+
+  for (const mode of ["keyring", "auto"] as const) {
+    await writeFile(configFilePath, `cli_auth_credentials_store = "${mode}"\n`, "utf8");
+
+    const result = await ensureFileBackedCredentialStore({
+      configFilePath,
+      currentMode: mode,
+      logger,
+    });
+
+    assert.equal(result.status, "unsupported");
+    assert.equal(result.effectiveMode, mode);
+    assert.equal(result.repaired, false);
+    assert.equal(
+      await readFile(configFilePath, "utf8"),
+      `cli_auth_credentials_store = "${mode}"\n`,
+    );
+  }
+
+  assertEvent(events, "credential_store.repair_unsupported", "warn");
+});
+
+test("credential store repair rejects symlinked shared config directories", async (t) => {
+  const tempRoot = await createTempDir("codexes-credential-store-symlink");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const realSharedHome = path.join(tempRoot, "real-shared-home");
+  const symlinkedSharedHome = path.join(tempRoot, "shared-home-link");
+  await mkdir(realSharedHome, { recursive: true });
+
+  try {
+    await symlink(realSharedHome, symlinkedSharedHome, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      /operation not permitted|not implemented|privilege/i.test(error.message)
+    ) {
+      t.skip(`symlink creation unavailable: ${error.message}`);
+      return;
+    }
+    throw error;
+  }
+
+  const { events, logger } = createTestLogger();
+  const configFilePath = path.join(symlinkedSharedHome, "config.toml");
+
+  await assert.rejects(
+    () =>
+      ensureFileBackedCredentialStore({
+        configFilePath,
+        currentMode: "missing",
+        logger,
+      }),
+    /Unsafe Codex config target\./i,
+  );
+
+  assert.equal(
+    await readFile(path.join(realSharedHome, "config.toml"), "utf8").catch(() => null),
+    null,
+  );
+  assertEvent(events, "credential_store.symlink_blocked", "error");
 });

@@ -186,6 +186,163 @@ test("CLI hides structured fatal logs from user stderr by default", async (t) =>
   assert.doesNotMatch(stderr, /stack/i);
 });
 
+test("account add repairs a missing shared credential store before login", async (t) => {
+  const tempRoot = await createTempDir("codexes-account-add-repair");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const platformState = resolvePlatformStateRoot(tempRoot);
+  const dataRoot = platformState.dataRoot;
+  const sharedCodexHome = path.join(dataRoot, "shared-home");
+  const binRoot = path.join(tempRoot, "bin");
+  const fakeCodexScript = path.join(tempRoot, "fake-codex-login.mjs");
+
+  await mkdir(binRoot, { recursive: true });
+  await writeFile(
+    fakeCodexScript,
+    [
+      "import { mkdir, writeFile } from 'node:fs/promises';",
+      "import path from 'node:path';",
+      "if (process.argv[2] !== 'login') process.exit(2);",
+      "await mkdir(process.env.CODEX_HOME, { recursive: true });",
+      "await writeFile(path.join(process.env.CODEX_HOME, 'auth.json'), JSON.stringify({",
+      "  auth_mode: 'chatgpt',",
+      "  tokens: { account_id: 'acct-handoff4' },",
+      "  last_refresh: '2026-04-22T00:00:00.000Z'",
+      "}, null, 2));",
+      "process.stdout.write('fake-login-ok\\n');",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await createCodexShim({ binRoot, scriptPath: fakeCodexScript });
+
+  const childEnv = { ...process.env };
+  delete childEnv.LOCALAPPDATA;
+  delete childEnv.LocalAppData;
+  delete childEnv.localappdata;
+  delete childEnv.XDG_STATE_HOME;
+
+  const child = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "src/cli.ts",
+      "account",
+      "add",
+      "handoff4",
+      "--timeout-ms",
+      "5000",
+    ],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...childEnv,
+        CODEX_HOME: sharedCodexHome,
+        LOG_LEVEL: "DEBUG",
+        PATH: `${binRoot}${path.delimiter}${process.env.PATH ?? ""}`,
+        ...platformState.env,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  child.stdout.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+  child.stderr.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
+
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("exit", (code) => resolve(code ?? 1));
+  });
+
+  const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+  const stderr = Buffer.concat(stderrChunks).toString("utf8");
+
+  assert.equal(exitCode, 0, stderr);
+  assert.match(stdout, /Added account "handoff4"/);
+  assert.equal(
+    await readFile(path.join(sharedCodexHome, "config.toml"), "utf8"),
+    'cli_auth_credentials_store = "file"\n',
+  );
+  assert.match(stderr, /"event":"account_add\.credential_store_repaired"/);
+
+  const registry = await readJson<{
+    accounts: Array<{ label: string }>;
+  }>(path.join(dataRoot, "registry.json"));
+  assert.equal(registry.accounts.some((account) => account.label === "handoff4"), true);
+});
+
+test("account add keeps explicit unsupported credential store failures controlled", async (t) => {
+  const tempRoot = await createTempDir("codexes-account-add-unsupported");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const platformState = resolvePlatformStateRoot(tempRoot);
+  const dataRoot = platformState.dataRoot;
+  const sharedCodexHome = path.join(dataRoot, "shared-home");
+  const binRoot = path.join(tempRoot, "bin");
+  const fakeCodexScript = path.join(tempRoot, "fake-codex-unused.mjs");
+
+  await mkdir(binRoot, { recursive: true });
+  await mkdir(sharedCodexHome, { recursive: true });
+  await writeFile(
+    path.join(sharedCodexHome, "config.toml"),
+    'cli_auth_credentials_store = "keyring"\n',
+    "utf8",
+  );
+  await writeFile(fakeCodexScript, "process.exit(0);\n", "utf8");
+  await createCodexShim({ binRoot, scriptPath: fakeCodexScript });
+
+  const childEnv = { ...process.env };
+  delete childEnv.LOCALAPPDATA;
+  delete childEnv.LocalAppData;
+  delete childEnv.localappdata;
+  delete childEnv.XDG_STATE_HOME;
+  delete childEnv.LOG_LEVEL;
+
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "src/cli.ts", "account", "add", "work"],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...childEnv,
+        CODEX_HOME: sharedCodexHome,
+        PATH: `${binRoot}${path.delimiter}${process.env.PATH ?? ""}`,
+        ...platformState.env,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  child.stdout.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+  child.stderr.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
+
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("exit", (code) => resolve(code ?? 1));
+  });
+
+  const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+  const stderr = Buffer.concat(stderrChunks).toString("utf8");
+
+  assert.equal(exitCode, 1);
+  assert.equal(stdout.trim(), "");
+  assert.match(
+    stderr,
+    /codexes: codexes account add requires cli_auth_credentials_store = "file"; detected keyring\./,
+  );
+  assert.doesNotMatch(stderr, /"event":/);
+  assert.doesNotMatch(stderr, /stack/i);
+  assert.equal(
+    await readFile(path.join(sharedCodexHome, "config.toml"), "utf8"),
+    'cli_auth_credentials_store = "keyring"\n',
+  );
+});
+
 test("CLI sanitizes context initialization failures before app context exists", async (t) => {
   const tempRoot = await createTempDir("codexes-cli-context-fatal");
   t.after(async () => removeTempDir(tempRoot));

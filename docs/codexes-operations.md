@@ -315,13 +315,37 @@ Useful events:
 Symptoms:
 
 - `credential_store.unsupported`
+- `credential_store.config_created`
+- `credential_store.config_repaired`
+- `account_add.credential_store_repaired`
 - `codexes account add requires cli_auth_credentials_store = "file"`
 
-Fix:
+Current behavior:
+
+- if the shared `config.toml` is missing, `codexes account add <label>` creates it with `cli_auth_credentials_store = "file"` before running `codex login`
+- if the shared `config.toml` exists but does not define `cli_auth_credentials_store`, `codexes account add <label>` appends `cli_auth_credentials_store = "file"` without replacing the rest of the file
+- if `cli_auth_credentials_store` is explicitly set to `keyring`, `auto`, or another unsupported value, `codexes` keeps the file unchanged and blocks the command
+
+Manual fix for explicit unsupported modes:
 
 1. Open the shared Codex config file.
 2. Set `cli_auth_credentials_store = "file"`.
 3. Retry the wrapper command.
+
+Diagnostics:
+
+```bash
+LOG_LEVEL=DEBUG codexes account add <label>
+```
+
+Expected DEBUG/INFO/WARN events:
+
+- `credential_store.repair_check`
+- `credential_store.config_created`
+- `credential_store.config_repaired`
+- `credential_store.repair_unsupported`
+- `account_add.credential_store_repaired`
+- `account_add.unsupported_credential_store`
 
 ### Missing or broken account auth
 
