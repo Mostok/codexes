@@ -10,6 +10,7 @@ import {
   syncExecutionWorkspaceBackToSharedHome,
   syncSharedRuntimeBackToAccount,
 } from "../src/runtime/activate-account/activate-account.js";
+import { removePathIfExists } from "../src/runtime/link-utils.js";
 import { prepareExecutionWorkspace } from "../src/runtime/login-workspace.js";
 import { createRuntimeContract, resolveAccountRuntimePaths } from "../src/runtime/runtime-contract.js";
 import {
@@ -205,6 +206,40 @@ test("prepareExecutionWorkspace reconciles direct auth and shared links inside s
 
   assertEvent(events, "workspace_reconcile.auth_entry_ready", "info");
   assertEvent(events, "workspace_reconcile.complete", "info");
+});
+
+test("removePathIfExists ignores locked stale codex-home entries during reconcile", async (t) => {
+  const tempRoot = await createTempDir("codexes-runtime-locked-stale-entry");
+  t.after(async () => removeTempDir(tempRoot));
+
+  const { events, logger } = createTestLogger();
+  const staleFile = path.join(tempRoot, "codex-home", "logs_2.sqlite-shm");
+  await mkdir(path.dirname(staleFile), { recursive: true });
+  await writeFile(staleFile, "locked\n", "utf8");
+
+  const removed = await removePathIfExists({
+    logger,
+    logContext: {
+      accountId: "acct-locked",
+      workspaceKind: "execution",
+      entryName: "logs_2.sqlite-shm",
+    },
+    logPrefix: "workspace_reconcile.stale_entry",
+    reason: "missing-from-shared-source",
+    removePath: async () => {
+      const error = new Error(
+        "EBUSY: resource busy or locked, unlink 'logs_2.sqlite-shm'",
+      ) as NodeJS.ErrnoException;
+      error.code = "EBUSY";
+      throw error;
+    },
+    targetPath: staleFile,
+  });
+
+  assert.equal(removed, false);
+  assert.notEqual(await stat(staleFile).catch(() => null), null);
+  assertEvent(events, "workspace_reconcile.stale_entry.remove_skipped", "warn");
+  assert.match(String(events.at(-1)?.details?.message), /\[FIX\]/);
 });
 
 test("runtime path resolution rejects path traversal account ids", async (t) => {

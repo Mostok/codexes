@@ -105,19 +105,45 @@ export async function removePathIfExists(input: {
   logContext: Record<string, unknown>;
   logPrefix: string;
   reason: string;
+  removePath?: typeof rm;
   targetPath: string;
 }): Promise<boolean> {
   if (!(await pathExists(input.targetPath))) {
     return false;
   }
 
-  await rm(input.targetPath, { force: true, recursive: true });
+  const removePath = input.removePath ?? rm;
+  try {
+    await removePath(input.targetPath, { force: true, recursive: true });
+  } catch (error) {
+    if (isBestEffortRemoveError(error)) {
+      input.logger.warn(`${input.logPrefix}.remove_skipped`, {
+        ...input.logContext,
+        message:
+          "[FIX] Ignoring locked stale codex-home entry during reconcile; launch will continue.",
+        reason: input.reason,
+        targetPath: input.targetPath,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+
+    throw error;
+  }
   input.logger.debug(`${input.logPrefix}.removed`, {
     ...input.logContext,
     reason: input.reason,
     targetPath: input.targetPath,
   });
   return true;
+}
+
+function isBestEffortRemoveError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+
+  return error.code === "EBUSY" || error.code === "EPERM";
 }
 
 async function isSameFile(sourcePath: string, targetPath: string): Promise<boolean> {
